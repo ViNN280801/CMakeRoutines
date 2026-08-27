@@ -88,6 +88,36 @@ Windows-specific version configuration and API targeting.
 - `WIN32_WINNT` and `NTDDI_VERSION` configuration
 - Windows SDK version detection
 
+#### `MsvcVcvarsConfig.cmake`
+
+Imports the Visual Studio MSVC toolset environment into the current CMake process so Ninja or Makefile generators can compile from a normal terminal (no Developer Command Prompt). Windows host only; no-op elsewhere. Requires Visual Studio 2019+ (or Build Tools) and `vswhere`.
+
+**Function:**
+
+- `configure_msvc_vcvars([ARCH <arch>] [VCVARSALL <path>] [INSTALLATION_PATH <path>] [VSWHERE <path>] [PRERELEASE])`
+
+**Call before `project()`.** After `project()`, compiler detection has already run and the function raises `FATAL_ERROR`.
+
+**Features:**
+
+- Discovers `vcvarsall.bat` via `vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find **/vcvarsall.bat`
+- Stable installs first; Preview (`-prerelease`) is a fallback, or the first pass when `PRERELEASE` / `MSVC_VCVARS_PRERELEASE` is on
+- Default `ARCH` is the host ISA (`PROCESSOR_ARCHITEW6432` so WOW64 is not treated as x86). Raw tokens with `_` (for example `amd64_x86`) are passed through to `vcvarsall`
+- True 32-bit host plus any non-`x86` vcvarsall argument is `FATAL_ERROR`
+- If `VSCMD_ARG_TGT_ARCH` is already set, does not re-run `vcvarsall`; still reports status and binds tools
+- Function arguments win over cache: `MSVC_VCVARSALL`, `MSVC_VS_INSTALLATION_PATH`, `MSVC_VCVARS_ARCH`, `MSVC_VSWHERE`, `MSVC_VCVARS_PRERELEASE`
+- Does not generate helper `.ps1` / `.cmd` files; the STATUS log prints a `cmd /c call vcvarsall ...` analog
+
+**Usage:**
+
+```cmake
+cmake_minimum_required(VERSION 3.16)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(core/MsvcVcvarsConfig)
+configure_msvc_vcvars()
+project(MyProject LANGUAGES C CXX)
+```
+
 ### C++-Specific Features (`cpp_specific/`)
 
 #### `CppModulesConfig.cmake`
@@ -575,10 +605,13 @@ apply_library_versioning(
 
 ```cmake
 cmake_minimum_required(VERSION 3.16)
-project(MyProject VERSION 1.0.0)
-
-# Include CMake utilities
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
+
+# Windows + Ninja from a normal terminal: import vcvars before project()
+include(core/MsvcVcvarsConfig)
+configure_msvc_vcvars()
+
+project(MyProject VERSION 1.0.0)
 
 # Core configuration
 include(core/CompilerFlags)
