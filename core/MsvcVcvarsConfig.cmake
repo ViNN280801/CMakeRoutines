@@ -9,6 +9,8 @@
 #
 # Call configure_msvc_vcvars() BEFORE project(). After project() this module
 # raises FATAL_ERROR: compiler detection has already run.
+# The guard uses PROJECT_NAME (this-run, not cached). CMAKE_PROJECT_NAME is a
+# STATIC cache entry and stays set on reconfigure, so it is the wrong check.
 #
 # Functions:
 #   configure_msvc_vcvars(
@@ -18,6 +20,15 @@
 #     [VSWHERE <path>]
 #     [PRERELEASE]
 #   )
+#   apply_msvc_vcvars_build_paths()   # also invoked from configure_msvc_vcvars()
+#
+# Ninja/Makefiles do not inherit configure-time ENV{INCLUDE}/LIB. After
+# importing vcvars, this module snapshots those dirs and injects them into
+# the compile/link graph (include_directories / link_directories). Without
+# that step, cl.exe from a plain prompt fails with C1083 on stdint.h.
+# Injection is skipped when the user already chose a non-MSVC frontend
+# (gcc, g++, clang++, MinGW): those toolchains must not see MSVC CRT paths.
+# -DCMAKE_C/CXX_COMPILER and CC/CXX are honored; cl.exe is only a default.
 #
 # Usage:
 #   cmake_minimum_required(VERSION 3.16)
@@ -364,6 +375,56 @@ function(_msvc_vcvars_import_env vcvarsall vcvars_arg out_count)
   set(${out_count} "${_imported}" PARENT_SCOPE)
 endfunction()
 
+function(_msvc_vcvars_honor_cc_cxx)
+  if(NOT CMAKE_C_COMPILER AND DEFINED ENV{CC} AND NOT "$ENV{CC}" STREQUAL "")
+    set(CMAKE_C_COMPILER "$ENV{CC}" CACHE FILEPATH "C compiler")
+    set(CMAKE_C_COMPILER "$ENV{CC}" PARENT_SCOPE)
+    message(STATUS "MsvcVcvarsConfig: honoring CC=$ENV{CC}")
+  endif()
+  if(NOT CMAKE_CXX_COMPILER AND DEFINED ENV{CXX} AND NOT "$ENV{CXX}" STREQUAL "")
+    set(CMAKE_CXX_COMPILER "$ENV{CXX}" CACHE FILEPATH "C++ compiler")
+    set(CMAKE_CXX_COMPILER "$ENV{CXX}" PARENT_SCOPE)
+    message(STATUS "MsvcVcvarsConfig: honoring CXX=$ENV{CXX}")
+  endif()
+endfunction()
+
+# cl and clang-cl consume vcvars INCLUDE/LIB. gcc/g++/clang++/MinGW do not.
+function(_msvc_vcvars_is_msvc_frontend compiler out_var)
+  if("${compiler}" STREQUAL "")
+    set(${out_var} TRUE PARENT_SCOPE)
+    return()
+  endif()
+  get_filename_component(_name "${compiler}" NAME)
+  string(TOLOWER "${_name}" _name)
+  if(_name STREQUAL "cl" OR _name STREQUAL "cl.exe")
+    set(${out_var} TRUE PARENT_SCOPE)
+  elseif(_name MATCHES "clang-cl")
+    set(${out_var} TRUE PARENT_SCOPE)
+  else()
+    set(${out_var} FALSE PARENT_SCOPE)
+  endif()
+endfunction()
+
+# TRUE only when every already-chosen C/C++ compiler is an MSVC frontend.
+# Unset compilers do not vote: the default path will bind cl.exe.
+function(_msvc_vcvars_wants_msvc_sysroot out_var)
+  if(CMAKE_C_COMPILER)
+    _msvc_vcvars_is_msvc_frontend("${CMAKE_C_COMPILER}" _c_ok)
+    if(NOT _c_ok)
+      set(${out_var} FALSE PARENT_SCOPE)
+      return()
+    endif()
+  endif()
+  if(CMAKE_CXX_COMPILER)
+    _msvc_vcvars_is_msvc_frontend("${CMAKE_CXX_COMPILER}" _cxx_ok)
+    if(NOT _cxx_ok)
+      set(${out_var} FALSE PARENT_SCOPE)
+      return()
+    endif()
+  endif()
+  set(${out_var} TRUE PARENT_SCOPE)
+endfunction()
+
 function(_msvc_vcvars_bind_tools)
   find_program(_msvc_cl NAMES cl cl.exe)
   find_program(_msvc_link NAMES link link.exe)
@@ -448,11 +509,86 @@ function(_msvc_vcvars_print_report)
   message(STATUS "  manual         : ${REP_MANUAL}")
 endfunction()
 
+# Convert Windows search-path ENV (semicolon, trailing backslashes) to a CMake
+# list with forward slashes. Trailing '\' before ';' would otherwise escape
+# the list separator.
+function(_msvc_vcvars_env_to_cmake_list env_name out_var)
+  if(NOT DEFINED ENV{${env_name}} OR "$ENV{${env_name}}" STREQUAL "")
+    set(${out_var} "" PARENT_SCOPE)
+    return()
+  endif()
+  file(TO_CMAKE_PATH "$ENV{${env_name}}" _as_cmake)
+  set(${out_var} "${_as_cmake}" PARENT_SCOPE)
+endfunction()
+
+function(_msvc_vcvars_snapshot_env)
+  _msvc_vcvars_env_to_cmake_list(INCLUDE _inc)
+  _msvc_vcvars_env_to_cmake_list(LIB _lib)
+  _msvc_vcvars_env_to_cmake_list(LIBPATH _libpath)
+  if(_inc)
+    set(MSVC_VCVARS_INCLUDE "${_inc}" CACHE INTERNAL
+      "MSVC INCLUDE dirs imported from vcvars (Ninja/Makefile builds)" FORCE)
+  endif()
+  if(_lib)
+    set(MSVC_VCVARS_LIB "${_lib}" CACHE INTERNAL
+      "MSVC LIB dirs imported from vcvars (Ninja/Makefile builds)" FORCE)
+  endif()
+  if(_libpath)
+    set(MSVC_VCVARS_LIBPATH "${_libpath}" CACHE INTERNAL
+      "MSVC LIBPATH imported from vcvars (Ninja/Makefile builds)" FORCE)
+  endif()
+endfunction()
+
+# Persist vcvars INCLUDE/LIB into the generated build. Directory commands
+# (include_directories / link_directories) take effect from a function;
+# CMAKE_<LANG>_STANDARD_INCLUDE_DIRECTORIES is set by the caller via
+# PARENT_SCOPE from configure_msvc_vcvars().
+function(apply_msvc_vcvars_build_paths)
+  if(NOT CMAKE_HOST_WIN32)
+    return()
+  endif()
+  if(NOT CMAKE_GENERATOR MATCHES "Ninja|Makefiles")
+    return()
+  endif()
+  _msvc_vcvars_wants_msvc_sysroot(_want_sysroot)
+  if(NOT _want_sysroot)
+    message(STATUS
+      "MsvcVcvarsConfig: skip INCLUDE/LIB persist (compiler is not an MSVC frontend)")
+    return()
+  endif()
+  get_property(_applied DIRECTORY PROPERTY MSVC_VCVARS_BUILD_PATHS_APPLIED)
+  if(_applied)
+    return()
+  endif()
+  if(NOT MSVC_VCVARS_INCLUDE AND NOT MSVC_VCVARS_LIB)
+    return()
+  endif()
+  set_property(DIRECTORY PROPERTY MSVC_VCVARS_BUILD_PATHS_APPLIED TRUE)
+
+  if(MSVC_VCVARS_INCLUDE)
+    include_directories(SYSTEM ${MSVC_VCVARS_INCLUDE})
+    list(LENGTH MSVC_VCVARS_INCLUDE _n_inc)
+    message(STATUS
+      "MsvcVcvarsConfig: persisted ${_n_inc} INCLUDE dirs for ${CMAKE_GENERATOR}")
+  endif()
+  if(MSVC_VCVARS_LIB)
+    link_directories(${MSVC_VCVARS_LIB})
+    list(LENGTH MSVC_VCVARS_LIB _n_lib)
+    message(STATUS
+      "MsvcVcvarsConfig: persisted ${_n_lib} LIB dirs for ${CMAKE_GENERATOR}")
+  endif()
+  if(MSVC_VCVARS_LIBPATH)
+    link_directories(${MSVC_VCVARS_LIBPATH})
+  endif()
+endfunction()
+
 # =============================================================================
 # Function: configure_msvc_vcvars
 #
 # Discovers vcvarsall.bat, imports its environment into this CMake process,
 # and points unset CMAKE_*_COMPILER cache entries at cl.exe / rc.exe / mt.exe.
+# Honors -DCMAKE_C/CXX_COMPILER and CC/CXX. Does not inject vcvars INCLUDE/LIB
+# when the chosen compiler is not an MSVC frontend (cl, clang-cl).
 # Must run before project().
 #
 # Parameters:
@@ -469,15 +605,32 @@ function(configure_msvc_vcvars)
     return()
   endif()
 
-  if(CMAKE_PROJECT_NAME)
+  # PROJECT_NAME is a normal variable: empty until project() in this cmake run.
+  # CMAKE_PROJECT_NAME is STATIC cache and is already set on every reconfigure.
+  if(PROJECT_NAME)
     message(FATAL_ERROR
       "MsvcVcvarsConfig: configure_msvc_vcvars() must be called BEFORE project(). "
-      "Compiler detection already ran for '${CMAKE_PROJECT_NAME}'. Example:\n"
+      "Compiler detection already ran for '${PROJECT_NAME}'. Example:\n"
       "  cmake_minimum_required(VERSION 3.16)\n"
       "  list(APPEND CMAKE_MODULE_PATH \"\${CMAKE_CURRENT_SOURCE_DIR}/cmake\")\n"
       "  include(core/MsvcVcvarsConfig)\n"
       "  configure_msvc_vcvars()\n"
       "  project(MyProject LANGUAGES C CXX)")
+  endif()
+
+  _msvc_vcvars_honor_cc_cxx()
+  _msvc_vcvars_wants_msvc_sysroot(_want_sysroot)
+  if(NOT _want_sysroot)
+    message(STATUS
+      "MsvcVcvarsConfig: user compiler is not an MSVC frontend; "
+      "leaving CMAKE_C/CXX_COMPILER unchanged and not injecting vcvars INCLUDE/LIB")
+    if(CMAKE_C_COMPILER)
+      message(STATUS "  CMAKE_C_COMPILER   : ${CMAKE_C_COMPILER}")
+    endif()
+    if(CMAKE_CXX_COMPILER)
+      message(STATUS "  CMAKE_CXX_COMPILER : ${CMAKE_CXX_COMPILER}")
+    endif()
+    return()
   endif()
 
   set(options PRERELEASE)
@@ -558,6 +711,14 @@ function(configure_msvc_vcvars)
       PASS "${_pass}"
       IMPORTED "${_imported}"
       MANUAL "${_manual}")
+  endif()
+
+  _msvc_vcvars_snapshot_env()
+  apply_msvc_vcvars_build_paths()
+  if(MSVC_VCVARS_INCLUDE AND CMAKE_GENERATOR MATCHES "Ninja|Makefiles")
+    set(CMAKE_C_STANDARD_INCLUDE_DIRECTORIES ${MSVC_VCVARS_INCLUDE} PARENT_SCOPE)
+    set(CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES ${MSVC_VCVARS_INCLUDE} PARENT_SCOPE)
+    set(CMAKE_RC_STANDARD_INCLUDE_DIRECTORIES ${MSVC_VCVARS_INCLUDE} PARENT_SCOPE)
   endif()
 
   set(MSVC_VCVARSALL "${_vcvarsall}" PARENT_SCOPE)
