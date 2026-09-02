@@ -26,6 +26,15 @@
 #                            (shared libs built in-tree: avoids stale libstdc++
 #                            in BUILD_RPATH dirs that breaks linking of
 #                            dependent executables).
+#   preferred_runtime_dir  - OPTIONAL (Linux/Unix). Directory of the toolchain
+#                            runtime that was linked (from link_compiler_runtime
+#                            property LCR_CXX_RUNTIME_DIR). When set, libstdc++,
+#                            libgcc_s, libatomic, and libgomp are copied from
+#                            this directory first. Required on hosts where
+#                            LIBRARY_PATH / a stale $ORIGIN copy would make
+#                            file(GET_RUNTIME_DEPENDENCIES) resolve an older
+#                            libstdc++ (e.g. Astra SE gcc-astra 6.0.30 vs
+#                            /usr/local/gcc-13.2).
 #   report_unresolved      - OPTIONAL. When ON, log each unresolved dependency
 #                            (informational; usually system/API-set DLLs).
 #                            Default: OFF (keeps build output quiet).
@@ -94,6 +103,58 @@ if(NOT DEFINED dependency_name_regex OR dependency_name_regex STREQUAL "")
   endif()
 endif()
 
+# --- Prefer toolchain dir from link_compiler_runtime -------------------------
+# file(GET_RUNTIME_DEPENDENCIES) follows ldd/$ORIGIN/LD_LIBRARY_PATH. A stale
+# libstdc++.so.6 already next to the binary (or gcc-astra earlier in
+# LIBRARY_PATH) wins over the GCC that actually linked the executable. Copy
+# matching sonames from preferred_runtime_dir first when provided.
+set(_copied_count 0)
+set(_forced_names "")
+
+if(UNIX AND NOT APPLE
+   AND DEFINED preferred_runtime_dir
+   AND preferred_runtime_dir
+   AND IS_DIRECTORY "${preferred_runtime_dir}"
+   AND NOT skip_compiler_runtime)
+  foreach(_crt_name IN ITEMS
+      "libstdc++.so.6"
+      "libgcc_s.so.1"
+      "libatomic.so.1"
+      "libgomp.so.1"
+      "libc++.so.1"
+      "libc++abi.so.1"
+      "libunwind.so.1")
+    set(_crt_src "${preferred_runtime_dir}/${_crt_name}")
+    if(NOT EXISTS "${_crt_src}")
+      continue()
+    endif()
+    get_filename_component(_crt_real "${_crt_src}" REALPATH)
+    if(NOT EXISTS "${_crt_real}")
+      message(WARNING
+        "CopyRuntimeDependencies: preferred path missing for '${_crt_name}': "
+        "'${_crt_src}'")
+      continue()
+    endif()
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+              "${_crt_real}" "${output_dir}/${_crt_name}"
+      RESULT_VARIABLE _copy_rc
+      ERROR_VARIABLE _copy_err
+      OUTPUT_QUIET
+    )
+    if(_copy_rc EQUAL 0)
+      message(STATUS
+        "CopyRuntimeDependencies: preferred '${_crt_name}' ← '${_crt_real}'")
+      list(APPEND _forced_names "${_crt_name}")
+      math(EXPR _copied_count "${_copied_count} + 1")
+    else()
+      message(WARNING
+        "CopyRuntimeDependencies: failed to copy preferred '${_crt_name}': "
+        "${_copy_err}")
+    endif()
+  endforeach()
+endif()
+
 # --- Resolve runtime dependencies -------------------------------------------
 # Use EXECUTABLES for executables (.exe or no .so/.dll/.dylib) so dependencies resolve correctly.
 get_filename_component(_target_name "${target_file}" NAME)
@@ -125,32 +186,37 @@ endif()
 # (e.g. libstdc++.so.6 -> libstdc++.so.6.0.33). file(COPY) of a symlink alone
 # leaves a dangling link in the output dir. Always copy the real file under the
 # soname the loader looks for (regular file, same content).
-set(_copied_count 0)
 
 foreach(dep ${_resolved})
   get_filename_component(dep_name "${dep}" NAME)
 
-  if(dep_name MATCHES "${dependency_name_regex}")
-    get_filename_component(dep_real "${dep}" REALPATH)
-    if(NOT EXISTS "${dep_real}")
-      message(WARNING
-        "CopyRuntimeDependencies: resolved path missing for '${dep_name}': '${dep}'")
-      continue()
-    endif()
-    execute_process(
-      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-              "${dep_real}" "${output_dir}/${dep_name}"
-      RESULT_VARIABLE _copy_rc
-      ERROR_VARIABLE _copy_err
-      OUTPUT_QUIET
-    )
-    if(_copy_rc EQUAL 0)
-      message(STATUS "CopyRuntimeDependencies: copied '${dep_name}' → '${output_dir}'")
-      math(EXPR _copied_count "${_copied_count} + 1")
-    else()
-      message(WARNING
-        "CopyRuntimeDependencies: failed to copy '${dep_name}': ${_copy_err}")
-    endif()
+  if(NOT dep_name MATCHES "${dependency_name_regex}")
+    continue()
+  endif()
+
+  if(dep_name IN_LIST _forced_names)
+    continue()
+  endif()
+
+  get_filename_component(dep_real "${dep}" REALPATH)
+  if(NOT EXISTS "${dep_real}")
+    message(WARNING
+      "CopyRuntimeDependencies: resolved path missing for '${dep_name}': '${dep}'")
+    continue()
+  endif()
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${dep_real}" "${output_dir}/${dep_name}"
+    RESULT_VARIABLE _copy_rc
+    ERROR_VARIABLE _copy_err
+    OUTPUT_QUIET
+  )
+  if(_copy_rc EQUAL 0)
+    message(STATUS "CopyRuntimeDependencies: copied '${dep_name}' → '${output_dir}'")
+    math(EXPR _copied_count "${_copied_count} + 1")
+  else()
+    message(WARNING
+      "CopyRuntimeDependencies: failed to copy '${dep_name}': ${_copy_err}")
   endif()
 endforeach()
 

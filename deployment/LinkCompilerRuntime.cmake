@@ -176,6 +176,22 @@ function(_lcr_find_libcxx out_var)
   set(${out_var} "" PARENT_SCOPE)
 endfunction()
 
+# -----------------------------------------------------------------------------
+# _lcr_set_runtime_dir_property(<target> <lib_path>)
+#
+# Records the directory of the selected C++ runtime shared library on <target>
+# as LCR_CXX_RUNTIME_DIR.  CopyRuntimeDependencies reads this (via
+# -Dpreferred_runtime_dir=...) so POST_BUILD copies the same libstdc++/libgcc
+# that was linked, not a stale $ORIGIN / LIBRARY_PATH hit (e.g. gcc-astra).
+# -----------------------------------------------------------------------------
+function(_lcr_set_runtime_dir_property target lib_path)
+  if(NOT lib_path OR NOT EXISTS "${lib_path}")
+    return()
+  endif()
+  get_filename_component(_lcr_runtime_dir "${lib_path}" DIRECTORY)
+  set_property(TARGET "${target}" PROPERTY LCR_CXX_RUNTIME_DIR "${_lcr_runtime_dir}")
+endfunction()
+
 # =============================================================================
 # Public API
 # =============================================================================
@@ -217,6 +233,12 @@ endfunction()
 
   `VERBOSE`
     Emit a `STATUS` message naming the selected runtime path.
+
+  Side effects
+  ^^^^^^^^^^^^
+  When a full runtime path is linked, sets target property
+  ``LCR_CXX_RUNTIME_DIR`` to that library's directory for
+  ``CopyRuntimeDependencies`` (``-Dpreferred_runtime_dir=...``).
 
   Platform behaviour
   ^^^^^^^^^^^^^^^^^^
@@ -351,6 +373,7 @@ function(link_compiler_runtime target)
     _lcr_find_libstdcxx(_lcr_selected "${_LCR_VALIDATE_ABI}")
     if(_lcr_selected)
       target_link_libraries("${target}" "${_vis}" "${_lcr_selected}")
+      _lcr_set_runtime_dir_property("${target}" "${_lcr_selected}")
       if(_LCR_VERBOSE)
         message(STATUS
           "link_compiler_runtime(${target}): GCC/libstdc++ → ${_lcr_selected}")
@@ -376,6 +399,7 @@ function(link_compiler_runtime target)
       _lcr_find_libcxx(_lcr_selected_cxx)
       if(_lcr_selected_cxx)
         target_link_libraries("${target}" "${_vis}" "${_lcr_selected_cxx}")
+        _lcr_set_runtime_dir_property("${target}" "${_lcr_selected_cxx}")
         if(_LCR_VERBOSE)
           message(STATUS
             "link_compiler_runtime(${target}): Clang/libc++ → ${_lcr_selected_cxx}")
@@ -408,6 +432,7 @@ function(link_compiler_runtime target)
       _lcr_find_libstdcxx(_lcr_selected "${_LCR_VALIDATE_ABI}")
       if(_lcr_selected)
         target_link_libraries("${target}" "${_vis}" "${_lcr_selected}")
+        _lcr_set_runtime_dir_property("${target}" "${_lcr_selected}")
         if(_LCR_VERBOSE)
           message(STATUS
             "link_compiler_runtime(${target}): Clang/libstdc++ → ${_lcr_selected}")
