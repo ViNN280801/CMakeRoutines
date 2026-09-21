@@ -10,6 +10,10 @@
 #   suppress_warnings(<target>
 #     [KEEP <warning1> <warning2> ...]
 #   )
+#   suppress_warnings_for_sources(<target>
+#     MATCH <path/folder/regex> ...
+#     [ALL | SUPPRESS <warning> ...]
+#   )
 #
 # Usage:
 #   include(WarningSuppression)
@@ -76,6 +80,176 @@ function(suppress_warnings target)
 endfunction()
 
 # =============================================================================
+# Function: suppress_warnings_for_sources
+#
+# Suppresses warnings only for the source files of <target> whose path matches
+# one of the given patterns. This is the per-file counterpart of
+# suppress_warnings(): instead of muting a whole target, it mutes only the
+# files you select (e.g. vendored 3rdparty sources compiled into a target).
+#
+# Parameters:
+#   <target>             - Target name (required)
+#   MATCH <patterns...>  - One or more regexes matched against each source's
+#                          normalized path (backslashes become '/'). A plain
+#                          folder name like "3rdparty" is also a valid regex
+#                          and matches any source under that folder.
+#   ALL                  - Suppress every warning for the matched sources
+#                          (default when SUPPRESS is omitted).
+#   SUPPRESS <warnings>  - Suppress only these warning groups:
+#                          * MSVC: numeric codes  (e.g. 4251 4267) -> /wd<code>
+#                          * Clang/GCC: names without -W prefix
+#                            (e.g. global-constructors) -> -Wno-<name>
+#                          * Intel: numeric codes -> -diag-disable:<code>
+#
+# Notes:
+#   - ALL and SUPPRESS are mutually exclusive.
+#   - Flags are applied with set_property(SOURCE ... APPEND PROPERTY
+#     COMPILE_OPTIONS ...), so they are appended after any target-level flags
+#     and therefore win (a trailing /w or -Wno-... overrides /W4 or -Wall).
+#
+# Usage:
+#   # Silence every warning for vendored third-party sources in a target
+#   suppress_warnings_for_sources(MyTarget MATCH 3rdparty)
+#
+#   # Silence only global-constructors + documentation in those files
+#   suppress_warnings_for_sources(MyTarget MATCH 3rdparty
+#     SUPPRESS global-constructors documentation)
+# =============================================================================
+function(suppress_warnings_for_sources target)
+  if(NOT TARGET ${target})
+    message(FATAL_ERROR "WarningSuppression: Target '${target}' does not exist")
+  endif()
+
+  set(options ALL)
+  set(oneValueArgs "")
+  set(multiValueArgs MATCH SUPPRESS)
+  cmake_parse_arguments(WSS "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+  if(NOT WSS_MATCH)
+    message(FATAL_ERROR
+      "WarningSuppression: suppress_warnings_for_sources requires MATCH <path/folder/regex> ...")
+  endif()
+
+  if(WSS_ALL AND WSS_SUPPRESS)
+    message(FATAL_ERROR
+      "WarningSuppression: ALL and SUPPRESS are mutually exclusive")
+  endif()
+
+  # Resolve the suppression flag list for the active compiler.
+  if(WSS_ALL OR NOT WSS_SUPPRESS)
+    _suppress_all_flags("${CMAKE_CXX_COMPILER_ID}" _suppress_flags)
+    set(_what "all warnings")
+  else()
+    _suppress_specific_flags("${CMAKE_CXX_COMPILER_ID}" "${WSS_SUPPRESS}" _suppress_flags)
+    set(_what "warnings (${WSS_SUPPRESS})")
+  endif()
+
+  # Collect the target sources and select those matching any pattern.
+  get_target_property(_all_srcs ${target} SOURCES)
+  if(NOT _all_srcs)
+    message(STATUS "WarningSuppression: target '${target}' has no sources")
+    return()
+  endif()
+
+  _warning_suppress_match_sources("${_all_srcs}" "${WSS_MATCH}" _matched)
+  if(NOT _matched)
+    message(STATUS
+      "WarningSuppression: no sources in '${target}' matched [${WSS_MATCH}]")
+    return()
+  endif()
+
+  list(LENGTH _matched _matched_count)
+
+  # A target may declare its sources relative to its own SOURCE_DIR, while
+  # set_property(SOURCE ...) resolves relative paths against the CALLER's
+  # directory - a mismatch that silently targets a non-existent path. Resolve
+  # them first so the call works from any directory.
+  get_target_property(_target_src_dir ${target} SOURCE_DIR)
+  set(_matched_abs "")
+  foreach(_s IN LISTS _matched)
+    if(IS_ABSOLUTE "${_s}")
+      list(APPEND _matched_abs "${_s}")
+    else()
+      list(APPEND _matched_abs "${_target_src_dir}/${_s}")
+    endif()
+  endforeach()
+
+  # Per-source options are emitted after target options, so a trailing /w
+  # always wins. On MSVC a /w that overrides a target-level /W4 would emit
+  # D9025 ("overriding '/W4' with '/w'"); fully-suppressed targets therefore
+  # also get WARNINGS OFF from the build config so no /W4 is ever present.
+  set_property(SOURCE ${_matched_abs} APPEND PROPERTY COMPILE_OPTIONS ${_suppress_flags})
+  message(STATUS
+    "WarningSuppression: suppressed ${_what} for ${_matched_count} source(s) in '${target}'")
+endfunction()
+
+# =============================================================================
+# Internal helper: _suppress_all_flags
+#
+# Returns the single flag that disables every warning for a compiler.
+# =============================================================================
+function(_suppress_all_flags compiler_id out_var)
+  if(compiler_id STREQUAL "MSVC")
+    set(_flags "/w")
+  else()
+    # GCC, Clang (incl. clang-cl), Intel and everything else accept -w.
+    set(_flags "-w")
+  endif()
+  set(${out_var} "${_flags}" PARENT_SCOPE)
+endfunction()
+
+# =============================================================================
+# Internal helper: _suppress_specific_flags
+#
+# Returns the flags that disable a specific set of warnings for a compiler.
+# MSVC/Intel take numeric codes; GCC/Clang take warning names (no -W prefix).
+# =============================================================================
+function(_suppress_specific_flags compiler_id warnings out_var)
+  set(_flags "")
+  if(compiler_id STREQUAL "MSVC")
+    foreach(_w IN LISTS warnings)
+      list(APPEND _flags "/wd${_w}")
+    endforeach()
+  elseif(compiler_id STREQUAL "GNU" OR compiler_id STREQUAL "Clang")
+    foreach(_w IN LISTS warnings)
+      list(APPEND _flags "-Wno-${_w}")
+    endforeach()
+  elseif(compiler_id STREQUAL "Intel")
+    foreach(_w IN LISTS warnings)
+      list(APPEND _flags "-diag-disable:${_w}")
+    endforeach()
+  else()
+    list(APPEND _flags "-w")
+  endif()
+  set(${out_var} "${_flags}" PARENT_SCOPE)
+endfunction()
+
+# =============================================================================
+# Internal helper: _warning_suppress_match_sources
+#
+# Given a list of source paths and a list of regex patterns, returns the subset
+# of sources whose normalized path (backslashes -> '/') matches any pattern.
+# =============================================================================
+function(_warning_suppress_match_sources sources patterns out_var)
+  set(_matched "")
+  foreach(_src IN LISTS sources)
+    file(TO_CMAKE_PATH "${_src}" _src_norm)
+    set(_is_match FALSE)
+    foreach(_pat IN LISTS patterns)
+      file(TO_CMAKE_PATH "${_pat}" _pat_norm)
+      if(_src_norm MATCHES "${_pat_norm}")
+        set(_is_match TRUE)
+        break()
+      endif()
+    endforeach()
+    if(_is_match)
+      list(APPEND _matched "${_src}")
+    endif()
+  endforeach()
+  set(${out_var} "${_matched}" PARENT_SCOPE)
+endfunction()
+
+# =============================================================================
 # Internal helper function: _generate_suppress_flags_from_ranges
 #
 # Generates suppression flags for numeric warning codes in given ranges.
@@ -88,13 +262,19 @@ endfunction()
 # =============================================================================
 function(_generate_suppress_flags_from_ranges keep_warnings flag_prefix result_var)
   set(generated_flags "")
-  set(ranges_list ${ARGN})  # Get all remaining arguments as ranges
 
-  # Process each range
-  foreach(range ${ranges_list})
-    string(REPLACE ";" " " range_list ${range})
-    list(GET range_list 0 range_start)
-    list(GET range_list 1 range_end)
+  # ARGN carries "start;end" ranges. CMake flattens those semicolon pairs into a
+  # single endpoint list (e.g. "4000;4999" "5000;5999" -> 4000;4999;5000;5999),
+  # so walk the endpoints pairwise instead of iterating ranges directly.
+  set(_endpoints ${ARGN})
+  list(LENGTH _endpoints _count)
+  math(EXPR _pairs "${_count} / 2")
+
+  set(_idx 0)
+  foreach(_p RANGE 1 ${_pairs})
+    list(GET _endpoints ${_idx} range_start)
+    math(EXPR _idx2 "${_idx} + 1")
+    list(GET _endpoints ${_idx2} range_end)
     math(EXPR range_end "${range_end} + 1")
 
     # Generate codes in range and suppress all except kept ones
@@ -113,6 +293,8 @@ function(_generate_suppress_flags_from_ranges keep_warnings flag_prefix result_v
         list(APPEND generated_flags ${flag_prefix}${warn_code})
       endif()
     endforeach()
+
+    math(EXPR _idx "${_idx} + 2")
   endforeach()
 
   set(${result_var} ${generated_flags} PARENT_SCOPE)

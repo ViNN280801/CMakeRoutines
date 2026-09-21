@@ -161,9 +161,27 @@ function(_configure_msvc_flags target warnings extra_flags)
     /Zc:__cplusplus           # Enable correct __cplusplus macro
     /utf-8                    # UTF-8 source and execution
     /permissive-              # Standards conformance mode
-    /MP                       # Multi-processor compilation
     /EHsc                     # Exception handling model
   )
+  # /MP is an MSVC cl.exe driver feature. clang-cl accepts the flag but
+  # ignores it and emits -Wunused-command-line-argument.
+  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    list(APPEND msvc_flags /MP)
+  endif()
+
+  # clang-cl maps /W4 to a much noisier warning set than cl.exe (-WCL4). The
+  # "compatible with older C++ standards" warnings (-Wc++98-compat family,
+  # -Wpre-c++14-compat, -Wpre-c++17-compat) fire on every C++11+ construct and
+  # are pure noise for a modern codebase, so suppress them for clang-cl.
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    list(APPEND msvc_flags
+      -Wno-c++98-compat
+      -Wno-c++98-compat-pedantic
+      -Wno-c++98-compat-local-type-template-args
+      -Wno-pre-c++14-compat
+      -Wno-pre-c++17-compat
+    )
+  endif()
 
   # Warning level configuration
   if(warnings STREQUAL "OFF")

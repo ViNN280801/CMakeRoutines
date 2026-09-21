@@ -1,0 +1,187 @@
+# Configure-time assertion helpers for target-level branch tests.
+#
+# These run inside a real `project(LANGUAGES C CXX)` so that STATIC targets can
+# be created and their COMPILE_OPTIONS / LINK_OPTIONS / COMPILE_DEFINITIONS /
+# properties inspected without ever building them.
+
+# --- Simulate a platform + compiler combination ---------------------------------
+# MACRO (not function) so the set() calls land in the caller's scope and are
+# visible to configure_* functions called afterwards.
+macro(simulate_platform win32 apple unix msvc cxx_id c_id)
+  set(WIN32 ${win32})
+  set(APPLE ${apple})
+  set(UNIX ${unix})
+  set(MSVC ${msvc})
+  set(CMAKE_CXX_COMPILER_ID "${cxx_id}")
+  set(CMAKE_C_COMPILER_ID "${c_id}")
+endmacro()
+
+# --- Fresh STATIC target with a unique name ------------------------------------
+set(_CT_DUMMY_SRC "${CMAKE_CURRENT_BINARY_DIR}/_ct_dummy.cpp")
+if(NOT EXISTS "${_CT_DUMMY_SRC}")
+  file(WRITE "${_CT_DUMMY_SRC}" "// CMakeRoutines target-test placeholder\n")
+endif()
+
+function(new_test_target out_var)
+  get_property(_i GLOBAL PROPERTY _CT_TARGET_INDEX)
+  if(NOT _i)
+    set(_i 0)
+  endif()
+  math(EXPR _i "${_i} + 1")
+  set_property(GLOBAL PROPERTY _CT_TARGET_INDEX "${_i}")
+  set(_name "_ct_target_${_i}")
+  add_library(${_name} STATIC "${_CT_DUMMY_SRC}")
+  set(${out_var} "${_name}" PARENT_SCOPE)
+endfunction()
+
+# --- Assertions -----------------------------------------------------------------
+function(_ct_fail message)
+  message(FATAL_ERROR "TARGET-TEST FAILED: ${message}")
+endfunction()
+
+function(_ct_increment)
+  get_property(_n GLOBAL PROPERTY _CT_ASSERT_COUNT)
+  if(NOT _n)
+    set(_n 0)
+  endif()
+  math(EXPR _n "${_n} + 1")
+  set_property(GLOBAL PROPERTY _CT_ASSERT_COUNT "${_n}")
+endfunction()
+
+function(expect_compile_option target regex)
+  _ct_increment()
+  get_target_property(_opts ${target} COMPILE_OPTIONS)
+  if(NOT _opts)
+    _ct_fail("'${target}' has no COMPILE_OPTIONS; expected a match for '${regex}'")
+  endif()
+  foreach(_o IN LISTS _opts)
+    if("${_o}" MATCHES "${regex}")
+      return()
+    endif()
+  endforeach()
+  _ct_fail("'${target}' COMPILE_OPTIONS lack '${regex}'; options=${_opts}")
+endfunction()
+
+function(expect_no_compile_option target regex)
+  _ct_increment()
+  get_target_property(_opts ${target} COMPILE_OPTIONS)
+  foreach(_o IN LISTS _opts)
+    if("${_o}" MATCHES "${regex}")
+      _ct_fail("'${target}' has unexpected compile option '${_o}' (matches '${regex}')")
+    endif()
+  endforeach()
+endfunction()
+
+function(expect_link_option target regex)
+  _ct_increment()
+  get_target_property(_opts ${target} LINK_OPTIONS)
+  if(NOT _opts)
+    _ct_fail("'${target}' has no LINK_OPTIONS; expected a match for '${regex}'")
+  endif()
+  foreach(_o IN LISTS _opts)
+    if("${_o}" MATCHES "${regex}")
+      return()
+    endif()
+  endforeach()
+  _ct_fail("'${target}' LINK_OPTIONS lack '${regex}'; options=${_opts}")
+endfunction()
+
+function(expect_no_link_option target regex)
+  _ct_increment()
+  get_target_property(_opts ${target} LINK_OPTIONS)
+  foreach(_o IN LISTS _opts)
+    if("${_o}" MATCHES "${regex}")
+      _ct_fail("'${target}' has unexpected link option '${_o}' (matches '${regex}')")
+    endif()
+  endforeach()
+endfunction()
+
+function(expect_compile_definition target def)
+  _ct_increment()
+  get_target_property(_defs ${target} COMPILE_DEFINITIONS)
+  if(NOT _defs)
+    _ct_fail("'${target}' has no COMPILE_DEFINITIONS; expected '${def}'")
+  endif()
+  foreach(_d IN LISTS _defs)
+    if("${_d}" STREQUAL "${def}")
+      return()
+    endif()
+  endforeach()
+  _ct_fail("'${target}' missing definition '${def}'; defs=${_defs}")
+endfunction()
+
+function(expect_no_compile_definition target def)
+  _ct_increment()
+  get_target_property(_defs ${target} COMPILE_DEFINITIONS)
+  foreach(_d IN LISTS _defs)
+    if("${_d}" STREQUAL "${def}")
+      _ct_fail("'${target}' has unexpected definition '${def}'")
+    endif()
+  endforeach()
+endfunction()
+
+# Assert a source (matched by path regex) has a COMPILE_OPTIONS entry matching
+# <regex>. Source COMPILE_OPTIONS are set per-file via suppress_warnings_for_sources.
+function(expect_source_compile_option target source_pattern regex)
+  _ct_increment()
+  get_target_property(_srcs ${target} SOURCES)
+  foreach(_s IN LISTS _srcs)
+    if(_s MATCHES "${source_pattern}")
+      get_source_file_property(_opts "${_s}" COMPILE_OPTIONS)
+      foreach(_o IN LISTS _opts)
+        if(_o MATCHES "${regex}")
+          return()
+        endif()
+      endforeach()
+    endif()
+  endforeach()
+  _ct_fail("'${target}' source matching '${source_pattern}' lacks COMPILE_OPTIONS '${regex}'")
+endfunction()
+
+function(expect_no_source_compile_option target source_pattern regex)
+  _ct_increment()
+  get_target_property(_srcs ${target} SOURCES)
+  foreach(_s IN LISTS _srcs)
+    if(_s MATCHES "${source_pattern}")
+      get_source_file_property(_opts "${_s}" COMPILE_OPTIONS)
+      foreach(_o IN LISTS _opts)
+        if(_o MATCHES "${regex}")
+          _ct_fail("'${target}' source '${_s}' has unexpected COMPILE_OPTIONS '${_o}' (matches '${regex}')")
+        endif()
+      endforeach()
+    endif()
+  endforeach()
+endfunction()
+
+function(expect_target_property target prop expected)
+  _ct_increment()
+  get_target_property(_got ${target} ${prop})
+  if(NOT "${_got}" STREQUAL "${expected}")
+    _ct_fail("'${target}' ${prop}: expected '${expected}', got '${_got}'")
+  endif()
+endfunction()
+
+# Run a nested configure that is EXPECTED to fail (FATAL_ERROR branches).
+# <body> is a full CMakeLists.txt body; <pattern> is matched against output.
+function(expect_configure_fail name body pattern)
+  set(_dir "${CMAKE_CURRENT_BINARY_DIR}/_ct_fail_${name}")
+  file(REMOVE_RECURSE "${_dir}")
+  file(MAKE_DIRECTORY "${_dir}")
+  file(WRITE "${_dir}/dummy.cpp" "// placeholder\n")
+  file(WRITE "${_dir}/CMakeLists.txt" "${body}")
+  execute_process(
+    COMMAND ${CMAKE_COMMAND}
+      -S "${_dir}" -B "${_dir}/build"
+      -G "${CMAKE_GENERATOR}"
+      "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
+      "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+    RESULT_VARIABLE _rc
+    OUTPUT_VARIABLE _out
+    ERROR_VARIABLE _err)
+  if(_rc EQUAL 0)
+    _ct_fail("'${name}' was expected to fail configure but succeeded\n${_out}${_err}")
+  endif()
+  if(NOT "${_out}${_err}" MATCHES "${pattern}")
+    _ct_fail("'${name}' failed but output did not match '${pattern}'\n${_out}${_err}")
+  endif()
+endfunction()

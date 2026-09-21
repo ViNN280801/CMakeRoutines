@@ -238,6 +238,20 @@ function(configure_sanitizers target)
     endif()
     message(STATUS "SanitizersConfig: Using user-specified flags only (no defaults) for '${target}'")
   endif()
+
+  # Print the recommended sanitizer runtime option strings once per configure,
+  # so the user can get maximum detail from the enabled sanitizers at runtime.
+  get_property(_runtime_opts_hint GLOBAL PROPERTY _LUMEX_SANITIZER_RUNTIME_OPTS_HINT)
+  if(NOT _runtime_opts_hint)
+    set_property(GLOBAL PROPERTY _LUMEX_SANITIZER_RUNTIME_OPTS_HINT TRUE)
+    print_sanitizer_runtime_options(
+      ADDRESS ${SANITIZER_ADDRESS}
+      MEMORY ${SANITIZER_MEMORY}
+      THREAD ${SANITIZER_THREAD}
+      UNDEFINED ${SANITIZER_UNDEFINED}
+      LEAK ${SANITIZER_LEAK}
+      CFI ${SANITIZER_CFI})
+  endif()
 endfunction()
 
 # =============================================================================
@@ -263,10 +277,12 @@ function(_configure_msvc_sanitizers target address undefined options)
     message(WARNING "SanitizersConfig: MSVC has limited UBSan support. Consider using /analyze for static analysis")
   endif()
 
-  # Apply flags
+  # Apply flags. /fsanitize=address is a COMPILE-time flag: cl.exe embeds the
+  # ASan runtime reference into the object, so link.exe picks the runtime up
+  # automatically. Passing it on the link line only makes link.exe emit
+  # LNK4044 ("unrecognized option '/fsanitize=address'; ignored").
   if(msvc_flags)
     target_compile_options(${target} PRIVATE ${msvc_flags})
-    target_link_options(${target} PRIVATE ${msvc_flags})
   endif()
   # Apply extra flags
   if(extra_flags)
@@ -277,6 +293,13 @@ function(_configure_msvc_sanitizers target address undefined options)
   if(compiler_flags)
     target_compile_options(${target} PRIVATE ${compiler_flags})
     target_link_options(${target} PRIVATE ${compiler_flags})
+  endif()
+
+  # ASan on Windows links a runtime DLL. Stage it next to the target so the
+  # executable starts (and gtest_discover_tests can run it) without the
+  # compiler bin directory being on PATH.
+  if(address AND msvc_flags)
+    stage_clang_sanitizer_runtime(${target} ADDRESS ON)
   endif()
 endfunction()
 
@@ -387,32 +410,75 @@ function(_configure_clang_sanitizers target address memory thread undefined leak
 
   # Apply sanitizer flags
   if(sanitizers)
+    _lumex_sanitizer_is_clang_cl(_isClangCl)
+
     string(REPLACE ";" "," sanitizerList "${sanitizers}")
     list(APPEND clangCompileFlags -fsanitize=${sanitizerList})
-    list(APPEND clangCompileFlags -fno-omit-frame-pointer)
+    # Frame pointer for backtraces: clang-cl wants the MSVC spelling (/Oy-);
+    # the GNU -fno-omit-frame-pointer is ignored by clang-cl and emits
+    # -Wunknown-argument.
+    if(_isClangCl)
+      list(APPEND clangCompileFlags /Oy-)
+    else()
+      list(APPEND clangCompileFlags -fno-omit-frame-pointer)
+    endif()
     list(APPEND clangCompileFlags -g)
-
-    list(APPEND clangLinkFlags -fsanitize=${sanitizerList})
-    list(APPEND clangLinkFlags -fno-omit-frame-pointer)
-    list(APPEND clangLinkFlags -g)
 
     if(cfi)
       # CFI needs LTO + hidden visibility at compile time; link with -no-pie on Linux PIE defaults.
       # -fsplit-lto-unit: one thin-LTO unit per source file so static deps link consistently.
       list(APPEND clangCompileFlags -flto=thin -fsplit-lto-unit -fvisibility=hidden -fno-pie)
-      list(APPEND clangLinkFlags -flto=thin -fsplit-lto-unit -no-pie)
     endif()
 
     # MemorySanitizer requires special flags
     if(memory)
       list(APPEND clangCompileFlags -fno-optimize-sibling-calls)
       list(APPEND clangCompileFlags -fsanitize-memory-track-origins=2 -O1)
-      list(APPEND clangLinkFlags -fsanitize-memory-track-origins=2 -O1)
     endif()
 
     target_compile_options(${target} PRIVATE ${clangCompileFlags})
-    target_link_options(${target} PRIVATE ${clangLinkFlags})
+
+    # clang-cl (Clang frontend, MSVC-compatible interface) on Windows is normally
+    # linked through link.exe, which ignores driver-only -fsanitize=... options.
+    # Link the sanitizer runtime libraries explicitly so the __asan_* / __ubsan_*
+    # symbols resolve. Native Clang keeps resolving the runtime from
+    # -fsanitize=... at link time. (The dynamic ASan runtime DLL is staged next to
+    # executables by stage_clang_sanitizer_runtime; that helper is called from the
+    # target's own directory by lumex_test_use_gtest, since add_custom_command(TARGET)
+    # requires the target to be defined in the current directory.)
+    if(_isClangCl)
+      _configure_clang_cl_sanitizer_link(${target} ${address} ${memory} ${thread} ${undefined} ${leak} ${cfi})
+    else()
+      list(APPEND clangLinkFlags -fsanitize=${sanitizerList})
+      list(APPEND clangLinkFlags -fno-omit-frame-pointer)
+      list(APPEND clangLinkFlags -g)
+
+      if(cfi)
+        list(APPEND clangLinkFlags -flto=thin -fsplit-lto-unit -no-pie)
+      endif()
+      if(memory)
+        list(APPEND clangLinkFlags -fsanitize-memory-track-origins=2 -O1)
+      endif()
+
+      target_link_options(${target} PRIVATE ${clangLinkFlags})
+    endif()
+
     message(STATUS "SanitizersConfig: Clang sanitizers enabled for '${target}': ${sanitizerList}")
+
+    # Print the recommended sanitizer runtime option strings once per configure.
+    # Done here too (not only in configure_sanitizers) because clang-cl consumers
+    # often call _configure_clang_sanitizers directly to bypass the MSVC branch.
+    get_property(_runtime_opts_hint GLOBAL PROPERTY _LUMEX_SANITIZER_RUNTIME_OPTS_HINT)
+    if(NOT _runtime_opts_hint)
+      set_property(GLOBAL PROPERTY _LUMEX_SANITIZER_RUNTIME_OPTS_HINT TRUE)
+      print_sanitizer_runtime_options(
+        ADDRESS ${address}
+        MEMORY ${memory}
+        THREAD ${thread}
+        UNDEFINED ${undefined}
+        LEAK ${leak}
+        CFI ${cfi})
+    endif()
   endif()
   # Apply extra flags
   if(extra_flags)
@@ -425,3 +491,285 @@ function(_configure_clang_sanitizers target address memory thread undefined leak
     target_link_options(${target} PRIVATE ${compiler_flags})
   endif()
 endfunction()
+
+# =============================================================================
+# clang-cl sanitizer runtime helpers
+#
+# clang-cl on Windows is normally linked through link.exe, which ignores the
+# driver-only -fsanitize=... options. The sanitizer runtime libraries must be
+# linked explicitly, and the dynamic ASan runtime (clang_rt.asan_dynamic-*.dll)
+# must sit next to every executable / shared library or the process fails to
+# start with STATUS_DLL_NOT_FOUND (0xc0000135).
+# =============================================================================
+
+# True when the active compiler is clang-cl (Clang frontend with the
+# MSVC-compatible interface). Distinguishes clang-cl from cl.exe
+# (CMAKE_CXX_COMPILER_ID "MSVC") and from native clang++ (MSVC is FALSE).
+function(_lumex_sanitizer_is_clang_cl out_var)
+  set(_result FALSE)
+  if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set(_result TRUE)
+  endif()
+  set(${out_var} "${_result}" PARENT_SCOPE)
+endfunction()
+
+# Resolves the active Clang compiler's resource directory (e.g. .../lib/clang/22),
+# which hosts lib/windows/clang_rt.*.{lib,dll}. Cached so the compiler is only
+# interrogated once per configure run.
+function(_lumex_sanitizer_resource_dir out_var)
+  # Cache via a GLOBAL property (not a CACHE variable) so the helper also runs
+  # under `cmake -P` script mode, which forbids `set(... CACHE ...)`.
+  get_property(_cached GLOBAL PROPERTY _LUMEX_SANITIZER_CLANG_RESOURCE_DIR)
+  if(_cached)
+    set(${out_var} "${_cached}" PARENT_SCOPE)
+    return()
+  endif()
+
+  set(_resource_dir "")
+  execute_process(
+    COMMAND "${CMAKE_CXX_COMPILER}" -print-resource-dir
+    OUTPUT_VARIABLE _resource_dir
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE _print_result)
+  if(NOT _print_result EQUAL 0 OR NOT _resource_dir OR NOT IS_DIRECTORY "${_resource_dir}")
+    get_filename_component(_compiler_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    file(GLOB _candidates "${_compiler_dir}/../lib/clang/*")
+    set(_resource_dir "")
+    foreach(_candidate ${_candidates})
+      if(IS_DIRECTORY "${_candidate}")
+        set(_resource_dir "${_candidate}")
+      endif()
+    endforeach()
+  endif()
+
+  set_property(GLOBAL PROPERTY _LUMEX_SANITIZER_CLANG_RESOURCE_DIR "${_resource_dir}")
+  set(${out_var} "${_resource_dir}" PARENT_SCOPE)
+endfunction()
+
+# Maps the compiler architecture id to the suffix used in clang_rt.* library
+# and DLL names (x86_64, i386, aarch64, arm).
+function(_lumex_sanitizer_arch_suffix out_var)
+  set(_suffix "")
+  set(_arch_id "${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}")
+  if(_arch_id MATCHES "^(X64|x64|AMD64|amd64)$")
+    set(_suffix "x86_64")
+  elseif(_arch_id MATCHES "^(X86|x86|IA32|i386)$")
+    set(_suffix "i386")
+  elseif(_arch_id MATCHES "^(ARM64|arm64|AArch64|aarch64)$")
+    set(_suffix "aarch64")
+  elseif(_arch_id MATCHES "^(ARM|arm)$")
+    set(_suffix "arm")
+  endif()
+  set(${out_var} "${_suffix}" PARENT_SCOPE)
+endfunction()
+
+# Explicitly links the clang-cl sanitizer runtime libraries. ASan uses the
+# dynamic runtime (clang_rt.asan_dynamic + its thunk); UBSan uses the static
+# standalone runtime. TSan/MSan are not supported on Windows.
+function(_configure_clang_cl_sanitizer_link target address memory thread undefined leak cfi)
+  _lumex_sanitizer_resource_dir(_resource_dir)
+  _lumex_sanitizer_arch_suffix(_arch_suffix)
+  if(NOT _resource_dir OR NOT _arch_suffix)
+    message(WARNING
+      "SanitizersConfig: clang-cl sanitizer runtime directory could not be "
+      "determined for '${target}'. The linker may fail to resolve "
+      "__asan_* / __ubsan_* symbols. Install LLVM/Clang runtime libraries or "
+      "pass them via CMAKE_EXE_LINKER_FLAGS manually.")
+    return()
+  endif()
+  set(_runtime_lib_dir "${_resource_dir}/lib/windows")
+  if(NOT IS_DIRECTORY "${_runtime_lib_dir}")
+    message(WARNING
+      "SanitizersConfig: clang-cl sanitizer runtime directory "
+      "'${_runtime_lib_dir}' does not exist; '${target}' may fail to link.")
+    return()
+  endif()
+  set(_runtime_libs "")
+  if(address)
+    list(APPEND _runtime_libs
+      "clang_rt.asan_dynamic_runtime_thunk-${_arch_suffix}.lib"
+      "clang_rt.asan_dynamic-${_arch_suffix}.lib")
+  endif()
+  if(undefined)
+    list(APPEND _runtime_libs
+      "clang_rt.ubsan_standalone-${_arch_suffix}.lib"
+      "clang_rt.ubsan_standalone_cxx-${_arch_suffix}.lib")
+  endif()
+  if(NOT _runtime_libs)
+    return()
+  endif()
+  target_link_options(${target} PRIVATE "/LIBPATH:${_runtime_lib_dir}" ${_runtime_libs})
+  message(STATUS
+    "SanitizersConfig: clang-cl sanitizer runtime libraries for '${target}': ${_runtime_libs}")
+endfunction()
+
+# =============================================================================
+# Function: stage_clang_sanitizer_runtime
+#
+# Copies the Windows AddressSanitizer runtime DLL next to a target so it can
+# run. Handles both drivers:
+#   clang-cl - clang_rt.asan_dynamic-<arch>.dll from the clang resource dir;
+#   MSVC     - clang_rt.asan_dynamic-<arch>.dll (Release) or
+#              clang_rt.asan_dbg_dynamic-<arch>.dll (Debug) from the directory
+#              that holds cl.exe.
+#
+# The dynamic ASan runtime is a DLL on Windows; if it is missing beside the
+# executable the process fails to start with STATUS_DLL_NOT_FOUND
+# (0xc0000135), which also breaks gtest_discover_tests POST_BUILD discovery
+# and CTest. Staging it means neither build nor test run needs the compiler
+# bin directory on PATH (no vcvars import required).
+#
+# For test executables call this BEFORE gtest_discover_tests: POST_BUILD
+# commands run in registration order, so the copy must be registered first.
+# lumex_test_use_gtest does this automatically.
+#
+# Usage:
+#   stage_clang_sanitizer_runtime(MyTest ADDRESS ON UNDEFINED ON)
+# =============================================================================
+function(stage_clang_sanitizer_runtime target)
+  cmake_parse_arguments(ARG "" "ADDRESS;MEMORY;THREAD;UNDEFINED;LEAK;CFI" "" ${ARGN})
+
+  # Only AddressSanitizer ships a runtime DLL on Windows; UBSan/TSan runtimes
+  # are static libraries. Nothing to stage when ASan is off.
+  if(NOT ARG_ADDRESS)
+    return()
+  endif()
+
+  if(NOT TARGET ${target})
+    return()
+  endif()
+
+  # Only executables and shared libraries load the DLL at runtime.
+  get_target_property(_target_type ${target} TYPE)
+  if(NOT (_target_type STREQUAL "EXECUTABLE" OR _target_type STREQUAL "SHARED_LIBRARY"))
+    return()
+  endif()
+
+  # add_custom_command(TARGET ...) is directory-scoped: calling it for a target
+  # created in another directory is a hard CMake error ("TARGET ... was not
+  # created in this directory"). Staging only matters for the executables that
+  # load the runtime DLL, and those call this helper from their own directory
+  # (lumex_test_use_gtest, lumex_example_executable); a project-wide call from
+  # the root for libraries is a no-op by design.
+  get_target_property(_target_src_dir ${target} SOURCE_DIR)
+  if(NOT _target_src_dir STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    return()
+  endif()
+
+  # Idempotency: test executables are staged early by lumex_test_use_gtest and
+  # again (later) via _configure_clang_sanitizers; only add the copy once.
+  get_target_property(_already_staged ${target} _LUMEX_SANITIZER_RUNTIME_STAGED)
+  if(_already_staged)
+    return()
+  endif()
+
+  _lumex_sanitizer_arch_suffix(_arch_suffix)
+  if(NOT _arch_suffix)
+    return()
+  endif()
+
+  set(_asan_runtime_dlls "")
+  _lumex_sanitizer_is_clang_cl(_is_clang_cl)
+  if(_is_clang_cl)
+    _lumex_sanitizer_resource_dir(_resource_dir)
+    if(_resource_dir)
+      list(APPEND _asan_runtime_dlls
+        "${_resource_dir}/lib/windows/clang_rt.asan_dynamic-${_arch_suffix}.dll")
+    endif()
+  elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    get_filename_component(_compiler_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    foreach(_stem clang_rt.asan_dynamic clang_rt.asan_dbg_dynamic)
+      list(APPEND _asan_runtime_dlls
+        "${_compiler_dir}/${_stem}-${_arch_suffix}.dll")
+    endforeach()
+  else()
+    return()
+  endif()
+
+  set(_staged_any FALSE)
+  foreach(_asan_runtime_dll IN LISTS _asan_runtime_dlls)
+    if(NOT EXISTS "${_asan_runtime_dll}")
+      continue()
+    endif()
+    set(_staged_any TRUE)
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_asan_runtime_dll}" "$<TARGET_FILE_DIR:${target}>"
+      COMMENT "Staging sanitizer runtime DLL for ${target}"
+      VERBATIM)
+  endforeach()
+
+  if(_staged_any)
+    set_target_properties(${target} PROPERTIES _LUMEX_SANITIZER_RUNTIME_STAGED TRUE)
+  else()
+    message(WARNING
+      "stage_clang_sanitizer_runtime: no ASan runtime DLL found in "
+      "[${_asan_runtime_dlls}]; '${target}' may fail to start with "
+      "STATUS_DLL_NOT_FOUND.")
+  endif()
+endfunction()
+
+# =============================================================================
+# Sanitizer runtime option strings
+#
+# Recommended values for the *_OPTIONS environment variables consumed by the
+# sanitizer runtimes. They turn on verbose diagnostics (symbolization, stack
+# traces, full thread history, allocation context) so reports carry the most
+# detail. Consumers may export these as-is, e.g.:
+#   set(ENV{ASAN_OPTIONS} "${SANITIZER_RUNTIME_ASAN_OPTIONS}")
+# =============================================================================
+set(SANITIZER_RUNTIME_ASAN_OPTIONS
+  "halt_on_error=1:abort_on_error=1:detect_leaks=0:leak_check_at_exit=0:print_legend=1:print_summary=1:print_cmdline=1:print_full_thread_history=1:strict_string_checks=1:fast_unwind_on_malloc=0:fast_unwind_on_fatal=0:malloc_context_size=30:symbolize=1:symbolize_inline_frames=1:verbosity=1:detect_stack_use_after_return=1:alloc_dealloc_mismatch=1:dump_instruction_bytes=1")
+set(SANITIZER_RUNTIME_UBSAN_OPTIONS
+  "print_stacktrace=1:halt_on_error=1:abort_on_error=1:print_summary=1:symbolize=1:symbolize_inline_frames=1:verbosity=1:log_exe_name=1")
+set(SANITIZER_RUNTIME_LSAN_OPTIONS
+  "exitcode=0:print_suppressions=0")
+set(SANITIZER_RUNTIME_MSAN_OPTIONS
+  "halt_on_error=1:abort_on_error=1:print_stats=1:verbosity=1:symbolize=1:malloc_context_size=30:log_exe_name=1")
+set(SANITIZER_RUNTIME_TSAN_OPTIONS
+  "halt_on_error=1:abort_on_error=1:report_thread_leaks=0:history_size=7:report_destroy_locked=1:report_signal_unsafe=1:verbosity=1:symbolize=1:log_exe_name=1")
+
+# Returns a list of "<SAN>_OPTIONS=<opts>" entries for the enabled sanitizers.
+# Usage:
+#   sanitizer_runtime_options(result ADDRESS ON UNDEFINED ON)
+function(sanitizer_runtime_options out_var)
+  cmake_parse_arguments(ARG "" "ADDRESS;MEMORY;THREAD;UNDEFINED;LEAK;CFI" "" ${ARGN})
+
+  set(_entries "")
+  if(ARG_ADDRESS)
+    list(APPEND _entries "ASAN_OPTIONS=${SANITIZER_RUNTIME_ASAN_OPTIONS}")
+  endif()
+  if(ARG_UNDEFINED)
+    list(APPEND _entries "UBSAN_OPTIONS=${SANITIZER_RUNTIME_UBSAN_OPTIONS}")
+  endif()
+  if(ARG_LEAK)
+    list(APPEND _entries "LSAN_OPTIONS=${SANITIZER_RUNTIME_LSAN_OPTIONS}")
+  endif()
+  if(ARG_MEMORY)
+    list(APPEND _entries "MSAN_OPTIONS=${SANITIZER_RUNTIME_MSAN_OPTIONS}")
+  endif()
+  if(ARG_THREAD)
+    list(APPEND _entries "TSAN_OPTIONS=${SANITIZER_RUNTIME_TSAN_OPTIONS}")
+  endif()
+
+  set(${out_var} "${_entries}" PARENT_SCOPE)
+endfunction()
+
+# Prints the recommended *_OPTIONS strings for the enabled sanitizers.
+# Usage:
+#   print_sanitizer_runtime_options(ADDRESS ON UNDEFINED ON)
+function(print_sanitizer_runtime_options)
+  sanitizer_runtime_options(_hints ${ARGN})
+  if(NOT _hints)
+    return()
+  endif()
+
+  message(STATUS
+    "SanitizersConfig: for verbose sanitizer diagnostics, run instrumented "
+    "binaries with:")
+  foreach(_hint IN LISTS _hints)
+    message(STATUS "  ${_hint}")
+  endforeach()
+endfunction()
+

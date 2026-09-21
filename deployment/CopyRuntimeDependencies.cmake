@@ -62,6 +62,15 @@
 
 cmake_minimum_required(VERSION 3.16)
 
+# CMP0207 (CMake 4.3): file(GET_RUNTIME_DEPENDENCIES) normalizes dependency
+# paths to forward slashes before matching filters. Opt in so mixed-separator
+# Windows paths (e.g. C:\Windows\system32/vcruntime140.dll) no longer emit a
+# dev warning. This script matches on the dependency filename, not its path, so
+# the normalization is safe. Guarded because CMP0207 does not exist before 4.3.
+if(POLICY CMP0207)
+  cmake_policy(SET CMP0207 NEW)
+endif()
+
 if(NOT target_file OR NOT EXISTS "${target_file}")
   message(WARNING
     "CopyRuntimeDependencies: target_file missing or not found: '${target_file}'. "

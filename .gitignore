@@ -3,3 +3,6 @@
 
 # Python cache files
 __pycache__/
+
+# Build trees (e.g. the tests/ ctest build dir)
+build*/

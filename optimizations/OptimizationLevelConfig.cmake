@@ -269,23 +269,39 @@ function(_opt_lvl_msvc target level enable_lto debug_symbols
   # /Gy is implied by /O2 but set explicitly for clarity and MinSizeRel/MINSIZE (/O1).
   target_compile_options(${target} PRIVATE /Gy)
 
+  # /arch:SSE2 is the 32-bit MSVC baseline. On x64, SSE2 is already the
+  # ABI floor; the flag is a no-op for cl.exe and is rejected by clang-cl
+  # (-Wunused-command-line-argument: expected AVX/AVX2/AVX512*).
+  set(_opt_lvl_arch_sse2 "")
+  if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(_opt_lvl_arch_sse2 "/arch:SSE2")
+  endif()
+
   # ---- Universal per-config flags (all levels) ----
+  # /RTC1 (runtime checks) and /D_DEBUG (debug-CRT macro) require the debug CRT
+  # (MultiThreadedDebugDLL / MultiThreadedDebug). When a release CRT is selected
+  # for Debug (e.g. clang-cl ASan forces MultiThreadedDLL -> /MD), emitting them
+  # would make the STL reference debug-CRT symbols (_calloc_dbg / _CrtDbgReport)
+  # that do not exist in the release CRT. Only emit them with a debug CRT.
+  set(_opt_lvl_debug_crt TRUE)
+  if(CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "^(MultiThreaded|MultiThreadedDLL)$")
+    set(_opt_lvl_debug_crt FALSE)
+  endif()
+
   target_compile_options(${target} PRIVATE
     # ----------------------------------------------------------------
     # doc Level 0 - Debug
     # /Od:   disable all optimizations (maximum debuggability)
     # /Ob0:  disable inline expansion (every function is its own frame)
-    # /RTC1: stack-frame + uninitialized-variable runtime checks
     # /sdl:  Security Development Lifecycle extra checks
     # /GS:   stack cookie buffer-security checks
+    # /DDEBUG: project "Debug configuration" marker (independent of the CRT)
     # ----------------------------------------------------------------
     $<$<CONFIG:Debug>:/Od>
     $<$<CONFIG:Debug>:/Ob0>
-    $<$<CONFIG:Debug>:/RTC1>
     $<$<CONFIG:Debug>:/sdl>
     $<$<CONFIG:Debug>:/GS>
     $<$<CONFIG:Debug>:/DDEBUG>
-    $<$<CONFIG:Debug>:/D_DEBUG>
 
     # ----------------------------------------------------------------
     # doc Level 6 - RelWithDebInfo (debug-oriented optimization)
@@ -309,6 +325,15 @@ function(_opt_lvl_msvc target level enable_lto debug_symbols
     $<$<CONFIG:MinSizeRel>:/GF>
     $<$<CONFIG:MinSizeRel>:/DNDEBUG>
   )
+
+  # Debug-CRT-only flags: runtime checks + the debug-CRT macro.
+  if(_opt_lvl_debug_crt)
+    target_compile_options(${target} PRIVATE
+      # /RTC1: stack-frame + uninitialized-variable runtime checks
+      $<$<CONFIG:Debug>:/RTC1>
+      $<$<CONFIG:Debug>:/D_DEBUG>
+    )
+  endif()
 
   # ---- Level-specific Release flags (Release only) ----
   set(_use_ltcg FALSE)
@@ -346,11 +371,17 @@ function(_opt_lvl_msvc target level enable_lto debug_symbols
     # doc Level 3 - Aggressive Release (portable)
     # /O2 /Ox:  maximize speed; /Ox adds /Ob2 on top of /O2
     # /Oi /Ot /Oy: intrinsics, speed preference, omit frame pointer
-    # /arch:SSE2: x64 baseline (universally supported)
+    # /arch:SSE2: x86 baseline only (see _opt_lvl_arch_sse2)
     # /GL:      whole-program optimization compile-side (LTO when enabled)
-    target_compile_options(${target} PRIVATE
-      $<$<CONFIG:Release>:/O2;/Ox;/Oi;/Ot;/Oy;/Gy;/GF;/DNDEBUG;/arch:SSE2>
-    )
+    if(_opt_lvl_arch_sse2)
+      target_compile_options(${target} PRIVATE
+        $<$<CONFIG:Release>:/O2;/Ox;/Oi;/Ot;/Oy;/Gy;/GF;/DNDEBUG;${_opt_lvl_arch_sse2}>
+      )
+    else()
+      target_compile_options(${target} PRIVATE
+        $<$<CONFIG:Release>:/O2;/Ox;/Oi;/Ot;/Oy;/Gy;/GF;/DNDEBUG>
+      )
+    endif()
     if(enable_lto)
       set(_use_ltcg TRUE)
     endif()
@@ -358,11 +389,17 @@ function(_opt_lvl_msvc target level enable_lto debug_symbols
   elseif(level STREQUAL "STANDARD")
     # doc Level 1 - Quick Build (minimal optimization)
     # /O1:      minimize size + basic speed opts; fast incremental builds
-    # /arch:SSE2: x64 baseline
+    # /arch:SSE2: x86 baseline only (see _opt_lvl_arch_sse2)
     # No LTO, no advanced inlining - prioritizes compilation speed
-    target_compile_options(${target} PRIVATE
-      $<$<CONFIG:Release>:/O1;/arch:SSE2;/DNDEBUG>
-    )
+    if(_opt_lvl_arch_sse2)
+      target_compile_options(${target} PRIVATE
+        $<$<CONFIG:Release>:/O1;${_opt_lvl_arch_sse2};/DNDEBUG>
+      )
+    else()
+      target_compile_options(${target} PRIVATE
+        $<$<CONFIG:Release>:/O1;/DNDEBUG>
+      )
+    endif()
     # STANDARD deliberately has no LTO even if ENABLE_LTO is requested
     # (its purpose is fast builds, not maximum performance)
 
@@ -377,10 +414,16 @@ function(_opt_lvl_msvc target level enable_lto debug_symbols
     # PORTABLE (default) - doc Level 2: Standard Release (portable)
     # /O2: recommended MSVC Release flag - balanced speed/size
     # /Oi /Ot /Oy: intrinsics, speed preference, omit frame pointer
-    # /arch:SSE2: x64 SSE2 baseline; safe on any x86-64 machine (since 2003)
-    target_compile_options(${target} PRIVATE
-      $<$<CONFIG:Release>:/O2;/Oi;/Ot;/Oy;/Gy;/GF;/DNDEBUG;/arch:SSE2>
-    )
+    # /arch:SSE2: x86 baseline only (see _opt_lvl_arch_sse2)
+    if(_opt_lvl_arch_sse2)
+      target_compile_options(${target} PRIVATE
+        $<$<CONFIG:Release>:/O2;/Oi;/Ot;/Oy;/Gy;/GF;/DNDEBUG;${_opt_lvl_arch_sse2}>
+      )
+    else()
+      target_compile_options(${target} PRIVATE
+        $<$<CONFIG:Release>:/O2;/Oi;/Ot;/Oy;/Gy;/GF;/DNDEBUG>
+      )
+    endif()
   endif()
 
   # LTO: /GL (Whole Program Optimization) at compile + /LTCG at link.
