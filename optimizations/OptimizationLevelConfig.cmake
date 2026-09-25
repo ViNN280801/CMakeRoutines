@@ -851,13 +851,28 @@ function(_opt_lvl_clang target level enable_lto debug_symbols
   enable_pgo pgo_mode pgo_dir extra_flags)
 
   include(CheckCXXCompilerFlag)
+  include(CheckCXXSourceCompiles)
   _opt_lvl_detect_arch()
 
   # libc++ is preferred on Clang for full C++20/23 support on non-GNU systems.
   # MSan builds use MSan-instrumented libc++ via compiler wrappers - not -stdlib=libc++.
+  #
+  # A flag check is not enough: Clang accepts -stdlib=libc++ even where libc++
+  # is not installed (a stock Ubuntu with only libstdc++), and then every
+  # standard header fails with "'cmath' file not found". So compile and link
+  # a program that uses a standard header; without libc++ Clang keeps its
+  # default library.
   if(NOT DCHANNEL_USE_MSAN)
-    check_cxx_compiler_flag("-stdlib=libc++" _opt_lvl_clang_libcxx)
-    if(_opt_lvl_clang_libcxx)
+    set(CMAKE_REQUIRED_FLAGS "-stdlib=libc++")
+    set(CMAKE_REQUIRED_LINK_OPTIONS "-stdlib=libc++")
+    set(CMAKE_REQUIRED_QUIET ON)
+    check_cxx_source_compiles(
+      "#include <string>\nint main () { return static_cast<int> (std::string (\"libc++\").size ()) - 6; }"
+      _opt_lvl_clang_libcxx_usable)
+    unset(CMAKE_REQUIRED_FLAGS)
+    unset(CMAKE_REQUIRED_LINK_OPTIONS)
+    unset(CMAKE_REQUIRED_QUIET)
+    if(_opt_lvl_clang_libcxx_usable)
       target_compile_options(${target} PRIVATE -stdlib=libc++)
       target_link_options(${target} PRIVATE -stdlib=libc++)
       if(CMAKE_CXX_STANDARD GREATER_EQUAL 20)

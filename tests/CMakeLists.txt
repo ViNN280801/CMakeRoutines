@@ -46,6 +46,8 @@ _cmake_routines_add_case(sanitizers_clang_cl_wiring)
 
 # --- Optimization regression (debug CRT gating for clang-cl ASan) ---
 _cmake_routines_add_case(optimization_debug_crt_gating)
+# --- Optimization regression (libc++ probe must compile a header) ---
+_cmake_routines_add_case(optimization_clang_libcxx_probe)
 
 # --- Module coverage ---
 _cmake_routines_add_case(sanitizer_profile_validate)
