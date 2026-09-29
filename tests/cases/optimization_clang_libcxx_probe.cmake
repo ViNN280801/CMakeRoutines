@@ -44,3 +44,29 @@ string(FIND "${_src}" "target_compile_options(\${target} PRIVATE -stdlib=libc++)
 if(_gate_pos EQUAL -1 OR _flag_pos EQUAL -1 OR _flag_pos LESS _gate_pos)
   message(FATAL_ERROR "-stdlib=libc++ is not gated by the probe result")
 endif()
+
+# A failed probe must not be silent: the fallback reports, once per configure
+# run, that libc++ was not taken and which library is kept. Without it a
+# missing libc++ (runtime package installed, development package not) showed
+# up only as libstdc++ in the deployed runtime.
+# Search from the probe gate on: the GCC helper earlier in the file carries
+# the same section marker.
+string(SUBSTRING "${_src}" ${_gate_pos} -1 _after_gate)
+string(FIND "${_after_gate}" "Clang libc++ not usable" _fallback_pos)
+string(FIND "${_after_gate}" "# ---- Universal per-config flags" _flags_pos)
+if(_fallback_pos EQUAL -1)
+  message(FATAL_ERROR "the libc++ fallback does not report itself")
+endif()
+if(NOT _flags_pos EQUAL -1 AND _flags_pos LESS _fallback_pos)
+  message(FATAL_ERROR
+    "the libc++ fallback report is outside the probe branch")
+endif()
+string(SUBSTRING "${_after_gate}" 0 ${_fallback_pos} _branch)
+if(NOT _branch MATCHES "_OPT_LVL_CLANG_LIBCXX_FALLBACK_REPORTED")
+  message(FATAL_ERROR
+    "the libc++ fallback report is not limited to once per configure run")
+endif()
+if(NOT _branch MATCHES "-print-file-name=libstdc\\+\\+\\.so")
+  message(FATAL_ERROR
+    "the libc++ fallback report does not name the library it keeps")
+endif()

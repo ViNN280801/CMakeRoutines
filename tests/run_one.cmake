@@ -18,6 +18,18 @@ if(NOT MODULE_ROOT)
   get_filename_component(MODULE_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 endif()
 
+# Scratch directory for cases that write files: TEMP on Windows, TMPDIR or
+# /tmp elsewhere (TEMP is unset on Linux, which sent those files to /).
+if(NOT CMAKE_ROUTINES_TEST_TMP)
+  if(NOT "$ENV{TEMP}" STREQUAL "")
+    set(CMAKE_ROUTINES_TEST_TMP "$ENV{TEMP}")
+  elseif(NOT "$ENV{TMPDIR}" STREQUAL "")
+    set(CMAKE_ROUTINES_TEST_TMP "$ENV{TMPDIR}")
+  else()
+    set(CMAKE_ROUTINES_TEST_TMP "/tmp")
+  endif()
+endif()
+
 set(_case_file "${CMAKE_CURRENT_LIST_DIR}/cases/${CASE}.cmake")
 if(NOT EXISTS "${_case_file}")
   message(FATAL_ERROR "missing case file: ${_case_file}")
@@ -28,6 +40,7 @@ if(CASE_EXPECT_FAIL)
     COMMAND ${CMAKE_COMMAND}
       -DCASE=${CASE}
       -DMODULE_ROOT=${MODULE_ROOT}
+      -DCMAKE_ROUTINES_TEST_TMP=${CMAKE_ROUTINES_TEST_TMP}
       -P ${_case_file}
     RESULT_VARIABLE _rv
     OUTPUT_VARIABLE _out

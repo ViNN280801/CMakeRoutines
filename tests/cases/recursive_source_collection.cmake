@@ -3,7 +3,7 @@
 
 include("${MODULE_ROOT}/utils/RecursiveSourceCollection.cmake")
 
-set(_tmp "$ENV{TEMP}/cmakeroutines-test-rsc")
+set(_tmp "${CMAKE_ROUTINES_TEST_TMP}/cmakeroutines-test-rsc")
 file(TO_CMAKE_PATH "${_tmp}" _tmp)
 file(REMOVE_RECURSE "${_tmp}")
 file(MAKE_DIRECTORY "${_tmp}/src/sub")

@@ -881,6 +881,32 @@ function(_opt_lvl_clang target level enable_lto debug_symbols
       else()
         message(STATUS "OptimizationLevelConfig: Clang libc++")
       endif()
+    else()
+      # Say once per configure run that libc++ was not taken, and which
+      # library is linked instead: otherwise the fallback shows up only as
+      # libstdc++ in the deployed runtime. The probe result is cached, so a
+      # libc++ installed later is picked up only in a fresh build tree.
+      get_property(_opt_lvl_libcxx_reported GLOBAL
+        PROPERTY _OPT_LVL_CLANG_LIBCXX_FALLBACK_REPORTED)
+      if(NOT _opt_lvl_libcxx_reported)
+        set_property(GLOBAL
+          PROPERTY _OPT_LVL_CLANG_LIBCXX_FALLBACK_REPORTED TRUE)
+        execute_process(
+          COMMAND "${CMAKE_CXX_COMPILER}" "-print-file-name=libstdc++.so"
+          OUTPUT_VARIABLE _opt_lvl_default_stdlib
+          OUTPUT_STRIP_TRAILING_WHITESPACE
+          ERROR_QUIET)
+        if(_opt_lvl_default_stdlib STREQUAL "libstdc++.so"
+           OR NOT EXISTS "${_opt_lvl_default_stdlib}")
+          set(_opt_lvl_default_stdlib "the compiler's default library")
+        endif()
+        message(STATUS
+          "OptimizationLevelConfig: Clang libc++ not usable (a program "
+          "built with -stdlib=libc++ does not compile or link; install the "
+          "libc++ and libc++abi development packages), keeping "
+          "${_opt_lvl_default_stdlib}. The result is cached in "
+          "_opt_lvl_clang_libcxx_usable: re-probe in a fresh build tree")
+      endif()
     endif()
   endif()
 

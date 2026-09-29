@@ -42,7 +42,7 @@ configure_version()
 _expect_eq("${PROJECT_VERSION}" "1.0.0" "default version")
 
 # _generate_version_header content (tweak = 0)
-set(_tmp "$ENV{TEMP}/cmakeroutines-test-ver.h")
+set(_tmp "${CMAKE_ROUTINES_TEST_TMP}/cmakeroutines-test-ver.h")
 file(TO_CMAKE_PATH "${_tmp}" _tmp)
 _generate_version_header("${_tmp}" 1 2 3 0)
 file(READ "${_tmp}" _content)

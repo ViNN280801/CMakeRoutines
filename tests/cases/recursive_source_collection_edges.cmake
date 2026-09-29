@@ -1,7 +1,7 @@
 # Edge/branch coverage for utils/RecursiveSourceCollection.cmake
 include("${MODULE_ROOT}/utils/RecursiveSourceCollection.cmake")
 
-set(_tmp "$ENV{TEMP}/cmakeroutines-test-rsc-edges")
+set(_tmp "${CMAKE_ROUTINES_TEST_TMP}/cmakeroutines-test-rsc-edges")
 file(TO_CMAKE_PATH "${_tmp}" _tmp)
 file(REMOVE_RECURSE "${_tmp}")
 file(MAKE_DIRECTORY "${_tmp}/a/sub")
