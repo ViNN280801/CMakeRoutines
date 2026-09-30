@@ -21,6 +21,9 @@ set(_module_root "${CMAKE_CURRENT_LIST_DIR}/../..")
 include("${CMAKE_CURRENT_LIST_DIR}/helpers.cmake")
 
 # Each case runs its tests immediately when included.
+# std_filesystem probes the real compiler, so it runs before any case
+# simulates another platform.
+include("${CMAKE_CURRENT_LIST_DIR}/cases/std_filesystem.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cases/compiler_flags.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cases/linker_flags.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cases/warning_suppression.cmake")

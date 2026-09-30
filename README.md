@@ -369,6 +369,21 @@ Universal dependency management.
 - Component-based dependencies
 - Version management
 
+#### `StdFilesystem.cmake`
+
+Links the library that `std::filesystem` needs with the active toolchain, if it needs one. Before GCC 9 (libstdc++) and LLVM 9 (libc++) `std::filesystem` lives in the static `libstdc++fs.a` / `libc++fs.a`: a target that uses it compiles but does not link, and a shared library links with undefined symbols that break every executable linked against it.
+
+**Functions:**
+
+- `link_std_filesystem(<target> [PUBLIC|PRIVATE|INTERFACE] [COMPILE_OPTIONS <option>...])`
+
+**Features:**
+
+- Links a small C++17 `std::filesystem` program without a library, then with `stdc++fs`, then with `c++fs`, and links the first variant that works (`PRIVATE` by default)
+- `COMPILE_OPTIONS` for flags outside `CMAKE_CXX_FLAGS` that change the standard library (`-stdlib=libc++`), used to compile and link the probe
+- One cached answer per compiler and flag set; MSVC and current toolchains get nothing
+- A warning, and nothing linked, when no variant links
+
 ### Deployment (`deployment/`)
 
 #### `InstallConfig.cmake`
