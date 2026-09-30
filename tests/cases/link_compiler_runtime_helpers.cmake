@@ -42,3 +42,16 @@ _lcr_detect_stdlib_flag(_r)
 if(NOT _r STREQUAL "libc++")
   message(FATAL_ERROR "expected libc++ from CXXFLAGS env, got '${_r}'")
 endif()
+
+# A second argument that is not a target (script mode has none) falls back to
+# the global flags; the target-level lookup is covered by
+# tests/target/cases/optimization_cxx_stdlib.cmake.
+_lcr_detect_stdlib_flag(_r no_such_target)
+if(NOT _r STREQUAL "libc++")
+  message(FATAL_ERROR "expected libc++ from CXXFLAGS env with a non-target, got '${_r}'")
+endif()
+set(ENV{CXXFLAGS} "")
+_lcr_detect_stdlib_flag(_r no_such_target)
+if(_r)
+  message(FATAL_ERROR "expected empty stdlib with a non-target, got '${_r}'")
+endif()

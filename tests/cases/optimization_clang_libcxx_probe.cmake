@@ -39,10 +39,36 @@ endif()
 
 # -stdlib=libc++ lands on the target only behind the probe result.
 string(FIND "${_src}" "if(_opt_lvl_clang_libcxx_usable)" _gate_pos)
-string(FIND "${_src}" "target_compile_options(\${target} PRIVATE -stdlib=libc++)"
+string(FIND "${_src}"
+  "target_compile_options(\${target} \${_opt_lvl_stdlib_scope} -stdlib=libc++)"
   _flag_pos)
 if(_gate_pos EQUAL -1 OR _flag_pos EQUAL -1 OR _flag_pos LESS _gate_pos)
   message(FATAL_ERROR "-stdlib=libc++ is not gated by the probe result")
+endif()
+
+# CXX_STDLIB (AUTO | LIBCXX | DEFAULT) is parsed, validated and passed to the
+# Clang helper; DEFAULT skips the probe, LIBCXX fails when libc++ is not
+# usable, and a library hands -stdlib=libc++ to its consumers (PUBLIC).
+if(NOT _src MATCHES "set\\(oneValueArgs[^)]*CXX_STDLIB")
+  message(FATAL_ERROR "configure_optimization_level does not parse CXX_STDLIB")
+endif()
+if(NOT _src MATCHES "CXX_STDLIB must be AUTO, LIBCXX or DEFAULT")
+  message(FATAL_ERROR "CXX_STDLIB is not validated")
+endif()
+if(NOT _src MATCHES "_opt_lvl_clang\\(\\\${target}[^)]*\"\\\${_cxx_stdlib}\"\\)")
+  message(FATAL_ERROR "CXX_STDLIB is not passed to _opt_lvl_clang")
+endif()
+if(NOT _src MATCHES "if\\(NOT DCHANNEL_USE_MSAN AND NOT cxx_stdlib STREQUAL \"DEFAULT\"\\)")
+  message(FATAL_ERROR "CXX_STDLIB DEFAULT does not skip the libc++ probe")
+endif()
+string(SUBSTRING "${_src}" ${_gate_pos} -1 _from_gate)
+string(FIND "${_from_gate}" "elseif(cxx_stdlib STREQUAL \"LIBCXX\")" _libcxx_pos)
+string(FIND "${_from_gate}" "message(FATAL_ERROR" _fatal_pos)
+if(_libcxx_pos EQUAL -1 OR _fatal_pos EQUAL -1 OR _fatal_pos LESS _libcxx_pos)
+  message(FATAL_ERROR "CXX_STDLIB LIBCXX does not fail without a usable libc++")
+endif()
+if(NOT _from_gate MATCHES "\\^\\(STATIC\\|SHARED\\|MODULE\\)_LIBRARY\\$\"\\)[ \n]*set\\(_opt_lvl_stdlib_scope PUBLIC\\)")
+  message(FATAL_ERROR "-stdlib=libc++ is not PUBLIC on library targets")
 endif()
 
 # A failed probe must not be silent: the fallback reports, once per configure

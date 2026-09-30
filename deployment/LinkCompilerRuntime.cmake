@@ -14,9 +14,11 @@ Compilers
 * GCC - finds `libstdc++.so` via `-print-file-name`; optionally
   validates the ABI version with `nm -D` (`_M_replace_cold` marker,
   present since GCC 12).
-* Clang / LLVMFlang - auto-detects `-stdlib=libc++` from the global
-  CMake flags; falls back to the libstdc++ probe (Clang's default on Linux)
-  when `-stdlib=libc++` is absent.
+* Clang / LLVMFlang - auto-detects `-stdlib=libc++` from the target's own
+  compile / link options, the INTERFACE options of the targets it links
+  directly (a library that exports `-stdlib=libc++`), then the global CMake
+  flags; falls back to the libstdc++ probe (Clang's default on Linux) when
+  `-stdlib=libc++` is absent.
 * MSVC - no-op; the CRT is linked implicitly through
   `MSVC_RUNTIME_LIBRARY`.
 * AppleClang / macOS - no-op for the system libc++; links `-lc++` only
@@ -53,14 +55,45 @@ function(_lcr_probe_file_name compiler lib_name out_var)
 endfunction()
 
 # -----------------------------------------------------------------------------
-# _lcr_detect_stdlib_flag(<out_var>)
+# _lcr_detect_stdlib_flag(<out_var> [<target>])
 #
-# Scans the global CMake C++ compile/link flags (and $ENV{CXXFLAGS}) for a
-# -stdlib=<name> option.  Sets <out_var> to the matched name (e.g. "libc++")
-# or to the empty string when no such flag is present.
+# Looks for a -stdlib=<name> option: first on <target> (its COMPILE_OPTIONS,
+# LINK_OPTIONS and INTERFACE_* options, then the INTERFACE options of the
+# targets it links directly, where a library built with -stdlib=libc++ puts
+# the flag for its consumers), then in the global CMake C++ compile/link
+# flags and $ENV{CXXFLAGS}. Sets <out_var> to the matched name (e.g.
+# "libc++") or to the empty string when no such flag is present.
 # -----------------------------------------------------------------------------
 function(_lcr_detect_stdlib_flag out_var)
   set(_lcr_stdlib "")
+
+  if(ARGC GREATER 1 AND TARGET "${ARGV1}")
+    set(_lcr_scan_targets "${ARGV1}")
+    get_target_property(_lcr_links "${ARGV1}" LINK_LIBRARIES)
+    if(_lcr_links)
+      foreach(_lcr_link IN LISTS _lcr_links)
+        if(TARGET "${_lcr_link}")
+          list(APPEND _lcr_scan_targets "${_lcr_link}")
+        endif()
+      endforeach()
+    endif()
+    foreach(_lcr_scan IN LISTS _lcr_scan_targets)
+      if(_lcr_scan STREQUAL "${ARGV1}")
+        set(_lcr_props COMPILE_OPTIONS LINK_OPTIONS
+          INTERFACE_COMPILE_OPTIONS INTERFACE_LINK_OPTIONS)
+      else()
+        set(_lcr_props INTERFACE_COMPILE_OPTIONS INTERFACE_LINK_OPTIONS)
+      endif()
+      foreach(_lcr_prop IN LISTS _lcr_props)
+        get_target_property(_lcr_values "${_lcr_scan}" ${_lcr_prop})
+        if(_lcr_values AND "${_lcr_values}" MATCHES "-stdlib=([A-Za-z0-9+_-]+)")
+          set(${out_var} "${CMAKE_MATCH_1}" PARENT_SCOPE)
+          return()
+        endif()
+      endforeach()
+    endforeach()
+  endif()
+
   foreach(_lcr_flags_var IN ITEMS
     CMAKE_CXX_FLAGS
     CMAKE_EXE_LINKER_FLAGS
@@ -220,9 +253,10 @@ endfunction()
   `STDLIB <name>`
     Override the detected C++ standard library.  Accepted values:
     `libstdc++` (GCC runtime) and `libc++` (LLVM runtime).
-    When omitted the function auto-detects from `CMAKE_CXX_FLAGS`,
-    `CMAKE_EXE_LINKER_FLAGS`, `CMAKE_SHARED_LINKER_FLAGS`, and
-    `$ENV{CXXFLAGS}`.
+    When omitted the function auto-detects from the target's own compile
+    and link options, the INTERFACE options of the targets it links
+    directly, then `CMAKE_CXX_FLAGS`, `CMAKE_EXE_LINKER_FLAGS`,
+    `CMAKE_SHARED_LINKER_FLAGS`, and `$ENV{CXXFLAGS}`.
 
   `VALIDATE_ABI`
     (Linux, GCC or Clang+libstdc++) Before accepting a libstdc++ candidate,
@@ -251,10 +285,11 @@ endfunction()
   |                  | with `nm`, and links the full library path.  Falls back  |
   |                  | to `-lstdc++` when no full path is found.                |
   +------------------+----------------------------------------------------------+
-  | Linux / Unix     | Detects `-stdlib=libc++` from global flags.  If set,     |
-  | (Clang)          | probes for `libc++.so` + optional `libunwind.so`         |
-  |                  | and links them; falls back to `-lc++`.  Otherwise uses   |
-  |                  | the libstdc++ probe identical to the GCC path.           |
+  | Linux / Unix     | Detects `-stdlib=libc++` (target, direct dependencies,   |
+  | (Clang)          | then global flags).  If set, probes for `libc++.so` +    |
+  |                  | optional `libunwind.so` and links them; falls back to    |
+  |                  | `-lc++`.  Otherwise uses the libstdc++ probe identical   |
+  |                  | to the GCC path.                                         |
   +------------------+----------------------------------------------------------+
   | macOS            | No-op for the system libc++.  Links `-lc++` only when    |
   | (Apple/Clang)    | `-stdlib=libc++` is detected in the global flags (i.e.   |
@@ -326,7 +361,7 @@ function(link_compiler_runtime target)
   if(APPLE)
     set(_lcr_apple_stdlib "${_LCR_STDLIB}")
     if(_lcr_apple_stdlib STREQUAL "")
-      _lcr_detect_stdlib_flag(_lcr_apple_stdlib)
+      _lcr_detect_stdlib_flag(_lcr_apple_stdlib "${target}")
     endif()
     if(_lcr_apple_stdlib STREQUAL "libc++")
       target_link_libraries("${target}" "${_vis}" c++)
@@ -361,7 +396,7 @@ function(link_compiler_runtime target)
   # Resolve stdlib: explicit override > flag detection > compiler default.
   set(_lcr_stdlib "${_LCR_STDLIB}")
   if(_lcr_stdlib STREQUAL "")
-    _lcr_detect_stdlib_flag(_lcr_stdlib)
+    _lcr_detect_stdlib_flag(_lcr_stdlib "${target}")
   endif()
   # Clang's default on Linux/Unix is libstdc++ unless -stdlib=libc++ is given.
   # GCC always uses libstdc++.

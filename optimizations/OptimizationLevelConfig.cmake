@@ -24,6 +24,7 @@
 #     [GCC_FLAGS     <flags...>]
 #     [CLANG_FLAGS   <flags...>]
 #     [INTEL_FLAGS   <flags...>]
+#     [CXX_STDLIB    <AUTO|LIBCXX|DEFAULT>]
 #   )
 #
 # Optimization LEVELS (controls flags for the Release build type):
@@ -57,6 +58,16 @@
 # Debug symbols:
 #   - MSVC:      /Zi compile + /DEBUG link (+ /DEBUG:FULL + /Zo in Release)
 #   - GCC/Clang: added on top of per-config -g3 (Debug) / -g (RelWithDebInfo)
+#
+# C++ standard library (Clang only; other compilers ignore CXX_STDLIB):
+#   AUTO    - default: -stdlib=libc++ when a program built with it compiles
+#             and links, otherwise the compiler default (reported once)
+#   LIBCXX  - -stdlib=libc++; FATAL_ERROR when libc++ is not usable
+#   DEFAULT - no -stdlib; the compiler default (libstdc++ of the selected
+#             GCC installation on Linux)
+#   On a STATIC, SHARED or MODULE library the flag is PUBLIC (compile and
+#   link): its consumers have to use the same library, because libc++ and
+#   libstdc++ mangle std::string differently. Executables get it PRIVATE.
 #
 # References: docs/compiler_optimizations.md (sections 2-7, levels 0-6)
 # Minimum CMake: 3.16
@@ -168,7 +179,8 @@ function(configure_optimization_level target)
   include(CheckCXXCompilerFlag)
 
   set(options "")
-  set(oneValueArgs LEVEL ENABLE_LTO DEBUG_SYMBOLS ENABLE_PGO PGO_MODE PGO_DIR)
+  set(oneValueArgs LEVEL ENABLE_LTO DEBUG_SYMBOLS ENABLE_PGO PGO_MODE PGO_DIR
+    CXX_STDLIB)
   set(multiValueArgs EXTRA_FLAGS MSVC_FLAGS GCC_FLAGS CLANG_FLAGS INTEL_FLAGS)
   cmake_parse_arguments(OPT_LVL "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
@@ -197,6 +209,16 @@ function(configure_optimization_level target)
 
   if(NOT OPT_LVL_PGO_DIR)
     set(OPT_LVL_PGO_DIR "${CMAKE_BINARY_DIR}/pgo_profile")
+  endif()
+
+  if(NOT OPT_LVL_CXX_STDLIB)
+    set(OPT_LVL_CXX_STDLIB "AUTO")
+  endif()
+  string(TOUPPER "${OPT_LVL_CXX_STDLIB}" _cxx_stdlib)
+  if(NOT _cxx_stdlib MATCHES "^(AUTO|LIBCXX|DEFAULT)$")
+    message(FATAL_ERROR
+      "OptimizationLevelConfig: CXX_STDLIB must be AUTO, LIBCXX or DEFAULT "
+      "(got '${OPT_LVL_CXX_STDLIB}')")
   endif()
 
   # LTO is not meaningful for PORTABLE (binary compatibility across x86-64)
@@ -235,7 +257,7 @@ function(configure_optimization_level target)
     _opt_lvl_clang(${target} "${_level}"
       "${OPT_LVL_ENABLE_LTO}" "${OPT_LVL_DEBUG_SYMBOLS}"
       "${OPT_LVL_ENABLE_PGO}" "${_pgo_mode}" "${OPT_LVL_PGO_DIR}"
-      "${OPT_LVL_CLANG_FLAGS}")
+      "${OPT_LVL_CLANG_FLAGS}" "${_cxx_stdlib}")
   elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Intel"
     OR CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     _opt_lvl_intel(${target} "${_level}"
@@ -848,21 +870,23 @@ endfunction()
 # Internal: Clang (including AppleClang)
 # =============================================================================
 function(_opt_lvl_clang target level enable_lto debug_symbols
-  enable_pgo pgo_mode pgo_dir extra_flags)
+  enable_pgo pgo_mode pgo_dir extra_flags cxx_stdlib)
 
   include(CheckCXXCompilerFlag)
   include(CheckCXXSourceCompiles)
   _opt_lvl_detect_arch()
 
-  # libc++ is preferred on Clang for full C++20/23 support on non-GNU systems.
-  # MSan builds use MSan-instrumented libc++ via compiler wrappers - not -stdlib=libc++.
+  # C++ standard library (CXX_STDLIB). libc++ is preferred on Clang for full
+  # C++20/23 support on non-GNU systems; DEFAULT keeps the compiler default.
+  # MSan builds use MSan-instrumented libc++ via compiler wrappers - not
+  # -stdlib=libc++.
   #
   # A flag check is not enough: Clang accepts -stdlib=libc++ even where libc++
   # is not installed (a stock Ubuntu with only libstdc++), and then every
   # standard header fails with "'cmath' file not found". So compile and link
   # a program that uses a standard header; without libc++ Clang keeps its
   # default library.
-  if(NOT DCHANNEL_USE_MSAN)
+  if(NOT DCHANNEL_USE_MSAN AND NOT cxx_stdlib STREQUAL "DEFAULT")
     set(CMAKE_REQUIRED_FLAGS "-stdlib=libc++")
     set(CMAKE_REQUIRED_LINK_OPTIONS "-stdlib=libc++")
     set(CMAKE_REQUIRED_QUIET ON)
@@ -873,14 +897,28 @@ function(_opt_lvl_clang target level enable_lto debug_symbols
     unset(CMAKE_REQUIRED_LINK_OPTIONS)
     unset(CMAKE_REQUIRED_QUIET)
     if(_opt_lvl_clang_libcxx_usable)
-      target_compile_options(${target} PRIVATE -stdlib=libc++)
-      target_link_options(${target} PRIVATE -stdlib=libc++)
+      # A library hands the choice to its consumers (compile and link): code
+      # built against libstdc++ does not link with a libc++ library.
+      get_target_property(_opt_lvl_type ${target} TYPE)
+      if(_opt_lvl_type MATCHES "^(STATIC|SHARED|MODULE)_LIBRARY$")
+        set(_opt_lvl_stdlib_scope PUBLIC)
+      else()
+        set(_opt_lvl_stdlib_scope PRIVATE)
+      endif()
+      target_compile_options(${target} ${_opt_lvl_stdlib_scope} -stdlib=libc++)
+      target_link_options(${target} ${_opt_lvl_stdlib_scope} -stdlib=libc++)
       if(CMAKE_CXX_STANDARD GREATER_EQUAL 20)
         target_compile_options(${target} PRIVATE -fexperimental-library)
         message(STATUS "OptimizationLevelConfig: Clang libc++ + experimental for C++${CMAKE_CXX_STANDARD}")
       else()
         message(STATUS "OptimizationLevelConfig: Clang libc++")
       endif()
+    elseif(cxx_stdlib STREQUAL "LIBCXX")
+      message(FATAL_ERROR
+        "OptimizationLevelConfig: CXX_STDLIB LIBCXX for '${target}', but a "
+        "program built with -stdlib=libc++ does not compile or link: install "
+        "the libc++ and libc++abi development packages (and re-probe in a "
+        "fresh build tree), or pass CXX_STDLIB AUTO or DEFAULT")
     else()
       # Say once per configure run that libc++ was not taken, and which
       # library is linked instead: otherwise the fallback shows up only as
