@@ -34,6 +34,24 @@ function(new_test_target out_var)
   set(${out_var} "${_name}" PARENT_SCOPE)
 endfunction()
 
+# --- Fresh linked target (SHARED or EXECUTABLE) with a unique name ---------------
+# For routines whose behavior depends on the target type (link-time steps).
+function(new_linked_test_target out_var type)
+  get_property(_i GLOBAL PROPERTY _CT_TARGET_INDEX)
+  if(NOT _i)
+    set(_i 0)
+  endif()
+  math(EXPR _i "${_i} + 1")
+  set_property(GLOBAL PROPERTY _CT_TARGET_INDEX "${_i}")
+  set(_name "_ct_target_${_i}")
+  if(type STREQUAL "EXECUTABLE")
+    add_executable(${_name} "${_CT_DUMMY_SRC}")
+  else()
+    add_library(${_name} ${type} "${_CT_DUMMY_SRC}")
+  endif()
+  set(${out_var} "${_name}" PARENT_SCOPE)
+endfunction()
+
 # --- Assertions -----------------------------------------------------------------
 function(_ct_fail message)
   message(FATAL_ERROR "TARGET-TEST FAILED: ${message}")

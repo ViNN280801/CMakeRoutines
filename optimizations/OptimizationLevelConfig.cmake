@@ -58,6 +58,18 @@
 # Debug symbols:
 #   - MSVC:      /Zi compile + /DEBUG link (+ /DEBUG:FULL + /Zo in Release)
 #   - GCC/Clang: added on top of per-config -g3 (Debug) / -g (RelWithDebInfo)
+#   - GCC/Clang Release on ELF platforms: the ELF counterpart of the PDB. The
+#     binary is linked with -Wl,--build-id, and right after the link its DWARF
+#     moves into <file>.debug (objcopy --only-keep-debug, zlib-compressed when
+#     objcopy supports it); the binary is then stripped as -Wl,--strip-all
+#     would leave it and gets a .gnu_debuglink naming that file, which gdb and
+#     addr2line look for next to the binary. Ship <file>.debug with the binary.
+#     optimizations/split-debug-info.sh does it as the target's
+#     C/CXX_LINKER_LAUNCHER (CMake 3.21+, from any directory) or, on older
+#     CMake, as a POST_BUILD of a target created in the calling directory.
+#     With no objcopy, or a linker launcher already on the target, the symbols
+#     stay inside the binary (WARNING); they are never dropped.
+#   - DEBUG_SYMBOLS OFF, MinSizeRel, MinGW: -Wl,--strip-all (no symbols).
 #
 # C++ standard library (Clang only; other compilers ignore CXX_STDLIB):
 #   AUTO    - default: -stdlib=libc++ when a program built with it compiles
@@ -81,6 +93,11 @@
 #     DEBUG_SYMBOLS ON
 #   )
 # =============================================================================
+
+# Resolved while this file is included and kept in the cache, so a call from a
+# directory that never included this module still finds the launcher.
+set(_OPT_LVL_SPLIT_DEBUG_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/split-debug-info.sh"
+  CACHE INTERNAL "configure_optimization_level: Release debug-info split launcher")
 
 # =============================================================================
 # Function: configure_optimization_level
@@ -566,26 +583,128 @@ macro(_opt_lvl_detect_arch)
 endmacro()
 
 # =============================================================================
+# Internal helper: does objcopy accept --compress-debug-sections (binutils
+# 2.26+, llvm-objcopy)? Asked once per objcopy path; <out_var> is 1 or 0.
+# =============================================================================
+function(_opt_lvl_objcopy_compresses out_var)
+  string(MAKE_C_IDENTIFIER "${CMAKE_OBJCOPY}" _key)
+  set(_cached "_OPT_LVL_OBJCOPY_COMPRESSES_${_key}")
+  if(NOT DEFINED ${_cached})
+    execute_process(
+      COMMAND "${CMAKE_OBJCOPY}" --help
+      RESULT_VARIABLE _rc
+      OUTPUT_VARIABLE _help
+      ERROR_VARIABLE _help
+    )
+    set(_answer 0)
+    if(_rc EQUAL 0 AND _help MATCHES "--compress-debug-sections")
+      set(_answer 1)
+    endif()
+    set(${_cached} ${_answer} CACHE INTERNAL
+      "configure_optimization_level: ${CMAKE_OBJCOPY} compresses debug sections")
+  endif()
+  set(${out_var} "${${_cached}}" PARENT_SCOPE)
+endfunction()
+
+# =============================================================================
+# Internal helper: move a Release target's DWARF into <file>.debug (ELF).
+# split-debug-info.sh runs right after the link: as the target's
+# C/CXX_LINKER_LAUNCHER (CMake 3.21+; a target property, so it works whichever
+# directory created the target - LumexLib configures its modules from its root),
+# or on older CMake as a POST_BUILD, which CMake allows only in the directory
+# that created the target. Where it cannot be set up, a linked target warns and
+# keeps its symbols inside the binary.
+# =============================================================================
+function(_opt_lvl_split_debug_info target)
+  get_target_property(_type ${target} TYPE)
+  if(NOT _type MATCHES "^(EXECUTABLE|SHARED_LIBRARY|MODULE_LIBRARY)$")
+    return()
+  endif()
+
+  foreach(_lang C CXX)
+    get_target_property(_launcher ${target} ${_lang}_LINKER_LAUNCHER)
+    if(NOT _launcher)
+      continue()
+    endif()
+    if(_launcher MATCHES "split-debug-info\\.sh")
+      return()  # Configured earlier for this target.
+    endif()
+    message(WARNING
+      "OptimizationLevelConfig: '${target}' already has ${_lang}_LINKER_LAUNCHER "
+      "'${_launcher}'; its Release debug symbols stay inside the binary.")
+    return()
+  endforeach()
+
+  if(NOT CMAKE_OBJCOPY)
+    message(WARNING
+      "OptimizationLevelConfig: no objcopy (CMAKE_OBJCOPY) for '${target}'; "
+      "its Release debug symbols stay inside the binary.")
+    return()
+  endif()
+
+  _opt_lvl_objcopy_compresses(_compress)
+  set(_split_cmd
+    /bin/sh "${_OPT_LVL_SPLIT_DEBUG_SCRIPT}" "${CMAKE_OBJCOPY}" "${_compress}"
+    "$<CONFIG:Release>" "$<TARGET_FILE:${target}>")
+
+  if(NOT CMAKE_VERSION VERSION_LESS 3.21)
+    set_target_properties(${target} PROPERTIES
+      C_LINKER_LAUNCHER "${_split_cmd}"
+      CXX_LINKER_LAUNCHER "${_split_cmd}"
+    )
+  else()
+    get_target_property(_target_dir ${target} BINARY_DIR)
+    if(NOT _target_dir STREQUAL CMAKE_CURRENT_BINARY_DIR)
+      message(WARNING
+        "OptimizationLevelConfig: CMake ${CMAKE_VERSION} cannot split the debug "
+        "symbols of '${target}' from another directory (needs 3.21 for a linker "
+        "launcher); its Release debug symbols stay inside the binary.")
+      return()
+    endif()
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${_split_cmd}
+      COMMENT "Moving the debug symbols of ${target} into a .debug file"
+      VERBATIM
+    )
+  endif()
+
+  message(STATUS
+    "OptimizationLevelConfig: Release debug symbols of '${target}' go to "
+    "<file>.debug (objcopy, compress=${_compress})")
+endfunction()
+
+# =============================================================================
 # Internal helper: apply dead-code elimination linker flags for GCC/Clang.
 # Platform-aware: ld64 on Apple uses -dead_strip; GNU ld/gold/lld use --gc-sections.
-# --strip-all removes all symbols from Release/MinSizeRel to reduce binary size.
+# --strip-all removes all symbols from MinSizeRel, and from Release unless
+# debug_symbols keeps them: on ELF platforms (UNIX, not Apple) the Release
+# DWARF then moves into <file>.debug and the binary carries a Build ID.
 # =============================================================================
-macro(_opt_lvl_apply_dce_linker target)
+function(_opt_lvl_apply_dce_linker target debug_symbols)
   if(APPLE)
     target_link_options(${target} PRIVATE
       $<$<CONFIG:Release>:-Wl,-dead_strip>
       $<$<CONFIG:MinSizeRel>:-Wl,-dead_strip>
     )
-  else()
-    target_link_options(${target} PRIVATE
-      $<$<CONFIG:Release>:-Wl,--gc-sections>
-      $<$<CONFIG:Release>:-Wl,--strip-all>
-      $<$<CONFIG:RelWithDebInfo>:-Wl,--gc-sections>
-      $<$<CONFIG:MinSizeRel>:-Wl,--gc-sections>
-      $<$<CONFIG:MinSizeRel>:-Wl,--strip-all>
-    )
+    return()
   endif()
-endmacro()
+
+  target_link_options(${target} PRIVATE
+    $<$<CONFIG:Release>:-Wl,--gc-sections>
+    $<$<CONFIG:RelWithDebInfo>:-Wl,--gc-sections>
+    $<$<CONFIG:MinSizeRel>:-Wl,--gc-sections>
+    $<$<CONFIG:MinSizeRel>:-Wl,--strip-all>
+  )
+
+  if(debug_symbols AND UNIX)
+    # Never strip here: the split strips the binary only after its DWARF is
+    # saved, and without a split the symbols stay inside.
+    target_link_options(${target} PRIVATE $<$<CONFIG:Release>:-Wl,--build-id>)
+    _opt_lvl_split_debug_info(${target})
+  else()
+    target_link_options(${target} PRIVATE $<$<CONFIG:Release>:-Wl,--strip-all>)
+  endif()
+endfunction()
 
 # =============================================================================
 # Internal: GCC
@@ -825,7 +944,7 @@ function(_opt_lvl_gcc target level enable_lto debug_symbols
   endif()
 
   # Dead-code elimination linker flags (platform-aware)
-  _opt_lvl_apply_dce_linker(${target})
+  _opt_lvl_apply_dce_linker(${target} "${debug_symbols}")
 
   # Extra debug symbols in Release (on top of per-config flags already applied)
   if(debug_symbols)
@@ -1114,7 +1233,7 @@ function(_opt_lvl_clang target level enable_lto debug_symbols
   endif()
 
   # Dead-code elimination linker flags (platform-aware)
-  _opt_lvl_apply_dce_linker(${target})
+  _opt_lvl_apply_dce_linker(${target} "${debug_symbols}")
 
   # Extra debug symbols in Release
   if(debug_symbols)
