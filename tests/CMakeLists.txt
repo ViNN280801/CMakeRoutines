@@ -60,6 +60,9 @@ _cmake_routines_add_case(version_config)
 _cmake_routines_add_case(static_analysis)
 _cmake_routines_add_case(link_compiler_runtime_helpers)
 _cmake_routines_add_case(split_debug_info_launcher)
+_cmake_routines_add_case(toolchain_runtime_rpath_helpers)
+_cmake_routines_add_fail_case(toolchain_runtime_rpath_invalid_stdlib
+  "STDLIB must be libstdc\\+\\+ or libc\\+\\+")
 _cmake_routines_add_case(warning_suppression_helpers)
 
 # --- MsvcVcvarsConfig pure helpers ---

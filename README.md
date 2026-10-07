@@ -432,6 +432,23 @@ Build information printing utility.
 - Platform detection
 - Feature flags status
 
+#### `ToolchainRuntimeRpath.cmake`
+
+Lets the binaries of a **build tree** find the C++ runtime of a compiler that lives outside the system paths (a GCC under `/opt` or `/usr/local`, a Clang built from source): `libstdc++` and `libgcc_s`, or `libc++`, `libc++abi` and `libunwind`. Without it the loader takes the older runtime of the system and the program stops with `GLIBCXX_3.4.32 not found` or `undefined symbol: std::__1::__hash_memory`.
+
+**Functions:**
+
+- `configure_toolchain_runtime_rpath(<target> [STDLIB <libstdc++|libc++>...])`
+- `get_toolchain_runtime_directories(<out_var> [STDLIB <libstdc++|libc++>...])`
+
+**Features:**
+
+- The directories come from the compiler (`-print-file-name=<soname>` with the flags of `CMAKE_CXX_FLAGS`, so a Clang `--gcc-toolchain=` / `--gcc-install-dir=` is honored) and only those outside `/lib*`, `/usr/lib*` (and everything below them) are used: a distribution compiler adds nothing
+- `configure_toolchain_runtime_rpath` appends them to the `BUILD_RPATH` of an executable, shared or module library, once; the installed binary keeps its `INSTALL_RPATH`
+- Without `STDLIB` the library is detected like `link_compiler_runtime` does (the target's own `-stdlib=`, then the ones it links, then the global flags); GCC always uses `libstdc++`
+- `get_toolchain_runtime_directories` gives the list for a project that is configured separately (`-DCMAKE_BUILD_RPATH=<dirs>`)
+- Nothing for MSVC, Windows (MinGW too), Cygwin, Apple, cross builds and compilers other than GCC and Clang
+
 ### Third-Party Integration (`3rdparty/`)
 
 #### `BoostConfig.cmake`
