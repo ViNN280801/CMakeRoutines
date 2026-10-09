@@ -447,6 +447,8 @@ Lets the binaries of a **build tree** find the C++ runtime of a compiler that li
 - `configure_toolchain_runtime_rpath` appends them to the `BUILD_RPATH` of an executable, shared or module library, once; the installed binary keeps its `INSTALL_RPATH`
 - Without `STDLIB` the library is detected like `link_compiler_runtime` does (the target's own `-stdlib=`, then the ones it links, then the global flags); GCC always uses `libstdc++`
 - `get_toolchain_runtime_directories` gives the list for a project that is configured separately (`-DCMAKE_BUILD_RPATH=<dirs>`)
+- Automatic for every target of a consumer: `configure_optimization_level(<target> ... TOOLCHAIN_RUNTIME_RPATH ON)` calls `configure_toolchain_runtime_rpath(<target>)` as its last step, after the `-stdlib=` choice (`CXX_STDLIB`) is on the target. The parameter is **off by default**, so a caller that does not pass it behaves as before; an explicit call on the same target adds nothing twice
+- The test is on the path, not on the loader's configuration: a runtime below `/lib*` or `/usr/lib*` that the loader does not search anyway (Astra Linux's `/usr/lib/gcc-astra/lib64`) gets no RUNPATH either; such a compiler needs the directory in `LD_LIBRARY_PATH` or an explicit `-DCMAKE_BUILD_RPATH=`
 - Nothing for MSVC, Windows (MinGW too), Cygwin, Apple, cross builds and compilers other than GCC and Clang
 
 ### Third-Party Integration (`3rdparty/`)

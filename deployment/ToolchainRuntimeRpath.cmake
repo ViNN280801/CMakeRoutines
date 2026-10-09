@@ -41,6 +41,13 @@ there), when cross-compiling (the runtime of the target is not the host's),
 and for compilers other than GCC and Clang. ``CMAKE_SKIP_BUILD_RPATH`` ON
 switches the property off in CMake itself.
 
+A project does not have to call :command:`configure_toolchain_runtime_rpath`
+for each target: ``configure_optimization_level(<target>
+TOOLCHAIN_RUNTIME_RPATH ON)`` (``optimizations/OptimizationLevelConfig.cmake``)
+makes it the last step of that call, for that target. The parameter is off by
+default. Both ways can be mixed on one target: a directory already in
+``BUILD_RPATH`` is not added again.
+
 .. command:: configure_toolchain_runtime_rpath
 
   .. code-block:: cmake

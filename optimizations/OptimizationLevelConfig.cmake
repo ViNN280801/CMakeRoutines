@@ -25,6 +25,7 @@
 #     [CLANG_FLAGS   <flags...>]
 #     [INTEL_FLAGS   <flags...>]
 #     [CXX_STDLIB    <AUTO|LIBCXX|DEFAULT>]
+#     [TOOLCHAIN_RUNTIME_RPATH <ON|OFF>]
 #   )
 #
 # Optimization LEVELS (controls flags for the Release build type):
@@ -81,6 +82,28 @@
 #   link): its consumers have to use the same library, because libc++ and
 #   libstdc++ mangle std::string differently. Executables get it PRIVATE.
 #
+# Toolchain runtime in the build tree (TOOLCHAIN_RUNTIME_RPATH, default OFF):
+#   ON  - the last step of the call is configure_toolchain_runtime_rpath
+#         (deployment/ToolchainRuntimeRpath.cmake) on the same <target>: an
+#         executable, shared or module library gets the directories of the
+#         compiler's C++ runtime that lie outside the system library
+#         directories (a GCC or LLVM under /opt, /usr/local) in its BUILD_RPATH,
+#         so the binaries of the build tree run without LD_LIBRARY_PATH. The
+#         standard library is the one this call selected (the -stdlib=libc++
+#         of CXX_STDLIB) or, without one, the one the target already links
+#         (a library that was configured before hands its -stdlib= to its
+#         users, so call this after target_link_libraries).
+#         Other target types (a static library) have no RPATH and are left
+#         alone; the installed binary keeps its INSTALL_RPATH. A distribution
+#         compiler, MSVC, Windows, Apple, cross builds and non-GCC/Clang
+#         compilers add nothing (see ToolchainRuntimeRpath.cmake).
+#   OFF - nothing is done (default: callers that do not pass the parameter
+#         behave as before).
+#   An explicit configure_toolchain_runtime_rpath(<target>) before or after
+#   the call is harmless: a directory already in BUILD_RPATH is not added
+#   again. A call that needs STDLIB, or a target linked after this call, stays
+#   an explicit configure_toolchain_runtime_rpath.
+#
 # References: docs/compiler_optimizations.md (sections 2-7, levels 0-6)
 # Minimum CMake: 3.16
 # Compilers: MSVC 2019+, GCC 7+, Clang 10+, IntelLLVM, Intel ICC
@@ -102,6 +125,13 @@ set(_OPT_LVL_SPLIT_DEBUG_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/split-debug-info.sh"
 # =============================================================================
 # Function: configure_optimization_level
 # =============================================================================
+# The module behind TOOLCHAIN_RUNTIME_RPATH, resolved now and kept in the cache
+# for the same reason as the split script; it is included on first use only, so
+# a caller that never asks for the RPATH loads nothing new.
+set(_OPT_LVL_RUNTIME_RPATH_MODULE
+  "${CMAKE_CURRENT_LIST_DIR}/../deployment/ToolchainRuntimeRpath.cmake"
+  CACHE INTERNAL "configure_optimization_level: toolchain runtime RPATH module")
+
 function(_opt_lvl_emit_warning title details mitigation)
   message(WARNING
     "\n"
@@ -197,7 +227,7 @@ function(configure_optimization_level target)
 
   set(options "")
   set(oneValueArgs LEVEL ENABLE_LTO DEBUG_SYMBOLS ENABLE_PGO PGO_MODE PGO_DIR
-    CXX_STDLIB)
+    CXX_STDLIB TOOLCHAIN_RUNTIME_RPATH)
   set(multiValueArgs EXTRA_FLAGS MSVC_FLAGS GCC_FLAGS CLANG_FLAGS INTEL_FLAGS)
   cmake_parse_arguments(OPT_LVL "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
@@ -236,6 +266,19 @@ function(configure_optimization_level target)
     message(FATAL_ERROR
       "OptimizationLevelConfig: CXX_STDLIB must be AUTO, LIBCXX or DEFAULT "
       "(got '${OPT_LVL_CXX_STDLIB}')")
+  endif()
+
+  # OFF unless asked: an empty value means "not given", like the options above.
+  set(_runtime_rpath OFF)
+  if(NOT "${OPT_LVL_TOOLCHAIN_RUNTIME_RPATH}" STREQUAL "")
+    string(TOUPPER "${OPT_LVL_TOOLCHAIN_RUNTIME_RPATH}" _runtime_rpath_value)
+    if(_runtime_rpath_value MATCHES "^(ON|TRUE|YES|Y|1)$")
+      set(_runtime_rpath ON)
+    elseif(NOT _runtime_rpath_value MATCHES "^(OFF|FALSE|NO|N|0)$")
+      message(FATAL_ERROR
+        "OptimizationLevelConfig: TOOLCHAIN_RUNTIME_RPATH must be ON or OFF "
+        "(got '${OPT_LVL_TOOLCHAIN_RUNTIME_RPATH}')")
+    endif()
   endif()
 
   # LTO is not meaningful for PORTABLE (binary compatibility across x86-64)
@@ -295,6 +338,13 @@ function(configure_optimization_level target)
 
   if(OPT_LVL_EXTRA_FLAGS)
     target_compile_options(${target} PRIVATE ${OPT_LVL_EXTRA_FLAGS})
+  endif()
+
+  # Last, because the -stdlib= choice of the dispatch above decides which
+  # runtime directories the target needs.
+  if(_runtime_rpath)
+    include("${_OPT_LVL_RUNTIME_RPATH_MODULE}")
+    configure_toolchain_runtime_rpath(${target})
   endif()
 endfunction()
 

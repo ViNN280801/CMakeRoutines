@@ -65,10 +65,20 @@ function(_trb_stdlib file out_var)
   endif()
 endfunction()
 
-function(_trb_expect_binary file build_dir)
+function(_trb_expect_binary file build_dir mode)
   _trb_stdlib("${file}" _stdlib)
   get_toolchain_runtime_directories(_expected STDLIB ${_stdlib})
   _trb_runpath("${file}" _entries)
+
+  # No entry twice, however the directories were asked for.
+  _ct_increment()
+  set(_unique ${_entries})
+  list(REMOVE_DUPLICATES _unique)
+  list(LENGTH _entries _count)
+  list(LENGTH _unique _unique_count)
+  if(NOT _count EQUAL _unique_count)
+    _ct_fail("'${file}' (${mode}) has a repeated RUNPATH entry: ${_entries}")
+  endif()
 
   # Never a directory of the system, never anything but the build tree and
   # the toolchain's own directories.
@@ -83,14 +93,19 @@ function(_trb_expect_binary file build_dir)
     endif()
   endforeach()
 
-  # Every directory of a toolchain outside the system paths is there.
+  # Every directory of a toolchain outside the system paths is there, except
+  # when the parameter was left off and no call was made: then none is.
   foreach(_dir IN LISTS _expected)
     _ct_increment()
-    if(NOT _dir IN_LIST _entries)
-      _ct_fail("'${file}' (${_stdlib}) lacks '${_dir}' in its RUNPATH: ${_entries}")
+    if(mode STREQUAL "NONE")
+      if(_dir IN_LIST _entries)
+        _ct_fail("'${file}' (${mode}) has '${_dir}' in its RUNPATH although nothing asked for it: ${_entries}")
+      endif()
+    elseif(NOT _dir IN_LIST _entries)
+      _ct_fail("'${file}' (${mode}, ${_stdlib}) lacks '${_dir}' in its RUNPATH: ${_entries}")
     endif()
   endforeach()
-  message(STATUS "toolchain_runtime_rpath_build: ${file} (${_stdlib}) RUNPATH=[${_entries}]")
+  message(STATUS "toolchain_runtime_rpath_build: ${mode} ${file} (${_stdlib}) RUNPATH=[${_entries}]")
 endfunction()
 
 if(_trb_skip)
@@ -98,45 +113,56 @@ if(_trb_skip)
 else()
   include("${_module_root}/deployment/ToolchainRuntimeRpath.cmake")
 
-  set(_trb_dir "${CMAKE_CURRENT_BINARY_DIR}/_ct_toolchain_runtime_rpath_build")
-  file(REMOVE_RECURSE "${_trb_dir}")
-  execute_process(
-    COMMAND ${CMAKE_COMMAND}
-      -S "${_trb_fixture}" -B "${_trb_dir}"
-      -G "${CMAKE_GENERATOR}"
-      "-DCMAKE_BUILD_TYPE=Release"
-      "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
-      "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
-      "-DMODULE_ROOT=${_module_root}"
-    RESULT_VARIABLE _rc
-    OUTPUT_VARIABLE _out
-    ERROR_VARIABLE _err)
-  if(NOT _rc EQUAL 0)
-    _ct_fail("toolchain_runtime_rpath fixture: configure failed\n${_out}${_err}")
-  endif()
-  execute_process(
-    COMMAND ${CMAKE_COMMAND} --build "${_trb_dir}"
-    RESULT_VARIABLE _rc
-    OUTPUT_VARIABLE _out
-    ERROR_VARIABLE _err)
-  if(NOT _rc EQUAL 0)
-    _ct_fail("toolchain_runtime_rpath fixture: build failed\n${_out}${_err}")
-  endif()
+  # Builds the fixture in <mode> and checks the RUNPATH of both binaries; a
+  # mode that asked for the directories also starts the program with
+  # LD_LIBRARY_PATH removed: with a toolchain outside the system paths the
+  # loader finds the runtime through the RUNPATH alone.
+  function(_trb_check_mode mode)
+    set(_trb_dir "${CMAKE_CURRENT_BINARY_DIR}/_ct_toolchain_runtime_rpath_build_${mode}")
+    file(REMOVE_RECURSE "${_trb_dir}")
+    execute_process(
+      COMMAND ${CMAKE_COMMAND}
+        -S "${_trb_fixture}" -B "${_trb_dir}"
+        -G "${CMAKE_GENERATOR}"
+        "-DCMAKE_BUILD_TYPE=Release"
+        "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
+        "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+        "-DMODULE_ROOT=${_module_root}"
+        "-DFIXTURE_RPATH_MODE=${mode}"
+      RESULT_VARIABLE _rc
+      OUTPUT_VARIABLE _out
+      ERROR_VARIABLE _err)
+    if(NOT _rc EQUAL 0)
+      _ct_fail("toolchain_runtime_rpath fixture (${mode}): configure failed\n${_out}${_err}")
+    endif()
+    execute_process(
+      COMMAND ${CMAKE_COMMAND} --build "${_trb_dir}"
+      RESULT_VARIABLE _rc
+      OUTPUT_VARIABLE _out
+      ERROR_VARIABLE _err)
+    if(NOT _rc EQUAL 0)
+      _ct_fail("toolchain_runtime_rpath fixture (${mode}): build failed\n${_out}${_err}")
+    endif()
 
-  get_filename_component(_trb_real_dir "${_trb_dir}" REALPATH)
-  foreach(_trb_file "${_trb_dir}/fixture_app" "${_trb_dir}/lib/libfixture_lib.so")
-    _trb_expect_binary("${_trb_file}" "${_trb_real_dir}")
+    get_filename_component(_trb_real_dir "${_trb_dir}" REALPATH)
+    foreach(_trb_file "${_trb_dir}/fixture_app" "${_trb_dir}/lib/libfixture_lib.so")
+      _trb_expect_binary("${_trb_file}" "${_trb_real_dir}" "${mode}")
+    endforeach()
+
+    if(NOT mode STREQUAL "NONE")
+      _ct_increment()
+      execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env --unset=LD_LIBRARY_PATH "${_trb_dir}/fixture_app"
+        RESULT_VARIABLE _rc
+        OUTPUT_VARIABLE _out
+        ERROR_VARIABLE _err)
+      if(NOT _rc EQUAL 0)
+        _ct_fail("fixture_app (${mode}) does not start without LD_LIBRARY_PATH (exit '${_rc}'): ${_out}${_err}")
+      endif()
+    endif()
+  endfunction()
+
+  foreach(_trb_mode CALL PARAMETER BOTH NONE)
+    _trb_check_mode(${_trb_mode})
   endforeach()
-
-  # The program starts without LD_LIBRARY_PATH: with a toolchain outside the
-  # system paths the loader finds the runtime through the RUNPATH alone.
-  _ct_increment()
-  execute_process(
-    COMMAND ${CMAKE_COMMAND} -E env --unset=LD_LIBRARY_PATH "${_trb_dir}/fixture_app"
-    RESULT_VARIABLE _rc
-    OUTPUT_VARIABLE _out
-    ERROR_VARIABLE _err)
-  if(NOT _rc EQUAL 0)
-    _ct_fail("fixture_app does not start without LD_LIBRARY_PATH (exit '${_rc}'): ${_out}${_err}")
-  endif()
 endif()
