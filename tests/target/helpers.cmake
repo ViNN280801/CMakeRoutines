@@ -47,6 +47,14 @@ function(new_linked_test_target out_var type)
   if(type STREQUAL "EXECUTABLE")
     add_executable(${_name} "${_CT_DUMMY_SRC}")
   else()
+    # CMake remembers APPLE at the moment a target is created. A SHARED
+    # library made while a case simulates Apple would be generated as a macOS
+    # dylib, and where a shared library has an import library (Windows) the
+    # Ninja generator then wants a TAPI tool for its text-based stub: the
+    # configure passes and the generate step fails. The simulation stays in
+    # the variable the routines read; only the target is made for the real
+    # host (this assignment is local to the function).
+    set(APPLE ${CMAKE_HOST_APPLE})
     add_library(${_name} ${type} "${_CT_DUMMY_SRC}")
   endif()
   set(${out_var} "${_name}" PARENT_SCOPE)

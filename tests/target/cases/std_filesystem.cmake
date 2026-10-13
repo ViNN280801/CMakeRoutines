@@ -43,8 +43,15 @@ foreach(_v IN LISTS _sfs_cache)
     endif()
   endif()
 endforeach()
-if(NOT _sfs_answers EQUAL 1)
-  _ct_fail("expected one cached answer, found ${_sfs_answers}")
+# MSVC and clang-cl (the MSVC variable) return before probing, so no answer is
+# cached there; every other compiler caches exactly one.
+if(MSVC)
+  set(_sfs_expect_answers 0)
+else()
+  set(_sfs_expect_answers 1)
+endif()
+if(NOT _sfs_answers EQUAL _sfs_expect_answers)
+  _ct_fail("expected ${_sfs_expect_answers} cached answer(s), found ${_sfs_answers}")
 endif()
 _ct_increment()
 
