@@ -165,6 +165,73 @@ if(UNIX AND NOT APPLE
 endif()
 
 # --- Resolve runtime dependencies -------------------------------------------
+# cmake -P has no vcvars. file(GET_RUNTIME_DEPENDENCIES) then selects objdump
+# and aborts with "Could not find objdump" after PublishDistr has already
+# copied the libraries, which fails the ninja publish_distr target
+# (2026-10-13). Force dumpbin and point COMMAND at the executable: it sits
+# next to cl.exe, which PublishDistr passes as cxx_compiler. Do not set
+# CMAKE_GET_RUNTIME_DEPENDENCIES_PLATFORM to "windows+" - CMake 4.x rejects
+# that token.
+if(CMAKE_HOST_WIN32)
+  set(CMAKE_GET_RUNTIME_DEPENDENCIES_TOOL "dumpbin")
+  unset(CMAKE_OBJDUMP CACHE)
+  unset(CMAKE_OBJDUMP)
+  unset(CMAKE_GET_RUNTIME_DEPENDENCIES_PLATFORM)
+
+  set(_crt_dumpbin "")
+  if(pe_dumpbin AND EXISTS "${pe_dumpbin}")
+    set(_crt_dumpbin "${pe_dumpbin}")
+  endif()
+  if(NOT _crt_dumpbin AND cxx_compiler)
+    get_filename_component(_crt_cl_dir "${cxx_compiler}" DIRECTORY)
+    if(EXISTS "${_crt_cl_dir}/dumpbin.exe")
+      set(_crt_dumpbin "${_crt_cl_dir}/dumpbin.exe")
+    endif()
+  endif()
+  if(NOT _crt_dumpbin)
+    find_program(_crt_dumpbin NAMES dumpbin dumpbin.exe)
+  endif()
+  if(NOT _crt_dumpbin)
+    # Do not use if(DEFINED ENV{ProgramFiles(x86)}): parentheses are cmake
+    # syntax and split the token.
+    set(_vswhere_candidates
+      "C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+      "C:/Program Files/Microsoft Visual Studio/Installer/vswhere.exe"
+    )
+    foreach(_vswhere IN LISTS _vswhere_candidates)
+      if(NOT EXISTS "${_vswhere}")
+        continue()
+      endif()
+      execute_process(
+        COMMAND "${_vswhere}"
+          -latest
+          -products *
+          -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+          -find "**/Hostx64/x64/dumpbin.exe"
+        OUTPUT_VARIABLE _vs_out
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+      )
+      if(_vs_out)
+        string(REPLACE "\r\n" "\n" _vs_out "${_vs_out}")
+        string(REPLACE "\r" "\n" _vs_out "${_vs_out}")
+        string(REGEX REPLACE "\n+$" "" _vs_out "${_vs_out}")
+        string(REGEX REPLACE ".*\n" "" _crt_dumpbin "${_vs_out}")
+        break()
+      endif()
+    endforeach()
+  endif()
+
+  if(_crt_dumpbin AND EXISTS "${_crt_dumpbin}")
+    set(CMAKE_GET_RUNTIME_DEPENDENCIES_COMMAND "${_crt_dumpbin}")
+    message(STATUS "CopyRuntimeDependencies: dumpbin=${_crt_dumpbin}")
+  else()
+    message(WARNING
+      "CopyRuntimeDependencies: dumpbin not found; skipping the runtime scan")
+    return()
+  endif()
+endif()
+
 # Use EXECUTABLES for executables (.exe or no .so/.dll/.dylib) so dependencies resolve correctly.
 get_filename_component(_target_name "${target_file}" NAME)
 

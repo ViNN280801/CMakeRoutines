@@ -11,3 +11,15 @@ endif()
 if(NOT _src MATCHES "if\\(POLICY CMP0207\\)")
   message(FATAL_ERROR "missing if(POLICY CMP0207) guard")
 endif()
+
+# cmake -P has no vcvars. Leaving the tool unset makes CMake look for objdump
+# and fail the publish target with "Could not find objdump" (2026-10-13).
+if(NOT _src MATCHES "CMAKE_GET_RUNTIME_DEPENDENCIES_TOOL \"dumpbin\"")
+  message(FATAL_ERROR "Windows runtime scan must force dumpbin")
+endif()
+if(NOT _src MATCHES "CMAKE_GET_RUNTIME_DEPENDENCIES_COMMAND")
+  message(FATAL_ERROR "Windows runtime scan must set the dumpbin command path")
+endif()
+if(NOT _src MATCHES "windows\\+")
+  message(FATAL_ERROR "script must keep the note that windows+ is rejected")
+endif()
