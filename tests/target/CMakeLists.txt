@@ -21,11 +21,13 @@ set(_module_root "${CMAKE_CURRENT_LIST_DIR}/../..")
 include("${CMAKE_CURRENT_LIST_DIR}/helpers.cmake")
 
 # Each case runs its tests immediately when included.
-# std_filesystem, split_debug_info_build and toolchain_runtime_rpath_build use
-# the real compiler, so they run before any case simulates another platform.
+# std_filesystem, split_debug_info_build, toolchain_runtime_rpath_build and
+# toolchain_runtime_rpath_windows use the real compiler, so they run before any
+# case simulates another platform.
 include("${CMAKE_CURRENT_LIST_DIR}/cases/std_filesystem.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cases/split_debug_info_build.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cases/toolchain_runtime_rpath_build.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cases/toolchain_runtime_rpath_windows.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cases/compiler_flags.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cases/linker_flags.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cases/warning_suppression.cmake")

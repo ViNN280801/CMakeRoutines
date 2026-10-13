@@ -14,6 +14,14 @@ project(ToolchainRuntimeRpathFixture C CXX)
 include("${MODULE_ROOT}/optimizations/OptimizationLevelConfig.cmake")
 include("${MODULE_ROOT}/deployment/ToolchainRuntimeRpath.cmake")
 
+# Windows (cases/toolchain_runtime_rpath_windows.cmake): a DLL is found next to
+# the executable and there is no RPATH, so both go into the build directory and
+# the library exports what it defines. Neither setting does anything on ELF.
+if(WIN32)
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
 add_subdirectory(lib)
 add_executable(fixture_app main.cpp)
 target_link_libraries(fixture_app PRIVATE fixture_lib)
