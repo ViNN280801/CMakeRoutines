@@ -64,6 +64,7 @@ _cmake_routines_add_case(toolchain_runtime_rpath_helpers)
 _cmake_routines_add_fail_case(toolchain_runtime_rpath_invalid_stdlib
   "STDLIB must be libstdc\\+\\+ or libc\\+\\+")
 _cmake_routines_add_case(warning_suppression_helpers)
+_cmake_routines_add_case(generate_build_info_python_path)
 
 # --- MsvcVcvarsConfig pure helpers ---
 _cmake_routines_add_case(msvc_vcvars_helpers)

@@ -27,6 +27,12 @@
 
 include(CMakePackageConfigHelpers)
 
+# The directory of this file, taken while it is being included: inside a
+# function CMAKE_CURRENT_LIST_FILE names the caller's list file. A global
+# property, so a call from any directory of the project finds the Python
+# script next to this file.
+set_property(GLOBAL PROPERTY _GBINFO_MODULE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+
 # ==========================================================================
 # Python detection - runs once when this file is first included
 # ==========================================================================
@@ -303,10 +309,10 @@ function(_gbinfo_call_python
         return()
     endif()
 
-    # Locate the Python script next to this cmake file
-    get_filename_component(_gbinfo_script_dir
-        "${CMAKE_CURRENT_LIST_FILE}" DIRECTORY)
-    set(_py_script "${_gbinfo_script_dir}/GenerateBuildInfo.py")
+    # The Python script next to this cmake file (_GBINFO_MODULE_DIR, set at
+    # include time; CMAKE_CURRENT_LIST_FILE here would be the caller's).
+    get_property(_gbinfo_module_dir GLOBAL PROPERTY _GBINFO_MODULE_DIR)
+    set(_py_script "${_gbinfo_module_dir}/GenerateBuildInfo.py")
 
     if(NOT EXISTS "${_py_script}")
         message(WARNING
